@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tplegal-demand-generator"
+version = "0.1.0"
+description = "Demand letter generator & compensation calculator"
+requires-python = ">=3.10"
+dependencies = [
+    "requests",
+    "holidays",
+]
+
+[project.scripts]
+generate-demand = "demand_generator:main"
+calc-rekompensa = "calc_cli:main"
+
+[tool.setuptools]
+py-modules = [
+    "demand_generator",
+    "demand_calc",
+    "demand_variants",
+    "demand_utils",
+    "calc_cli",
+]
