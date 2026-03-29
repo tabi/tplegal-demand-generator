@@ -3,6 +3,7 @@ __pycache__/
 *.pyo
 .env
 *.docx
+!demand_generator/templates/*.docx
 dist/
 build/
 *.egg-info/
