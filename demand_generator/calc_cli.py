@@ -27,7 +27,7 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
-from demand_calc import calculate_batch
+from demand_generator.calc import calculate_batch
 
 
 class _DecimalEncoder(json.JSONEncoder):
@@ -83,8 +83,6 @@ def main():
             errors.append("gross")
         if "due_date" not in inv:
             errors.append("due_date")
-        if "payment_date" not in inv:
-            errors.append("payment_date")
         if errors:
             print(f"ERROR: Invoice #{i+1} missing fields: {', '.join(errors)}", file=sys.stderr)
             sys.exit(1)
@@ -95,11 +93,16 @@ def main():
             print(f"ERROR: Invoice #{i+1} invalid due_date: {inv['due_date']}", file=sys.stderr)
             sys.exit(1)
 
-        try:
-            payment_date = date.fromisoformat(inv["payment_date"])
-        except (ValueError, TypeError):
-            print(f"ERROR: Invoice #{i+1} invalid payment_date: {inv['payment_date']}", file=sys.stderr)
-            sys.exit(1)
+        # payment_date opcjonalny — domyślnie today (faktura niezapłacona)
+        raw_payment = inv.get("payment_date")
+        if raw_payment is None:
+            payment_date = date.today()
+        else:
+            try:
+                payment_date = date.fromisoformat(raw_payment)
+            except (ValueError, TypeError):
+                print(f"ERROR: Invoice #{i+1} invalid payment_date: {raw_payment}", file=sys.stderr)
+                sys.exit(1)
 
         try:
             gross = Decimal(str(inv["gross"]))

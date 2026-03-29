@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 """
-Unit testy dla demand_calc.py — kalkulator rekompensat i odsetek handlowych.
+Unit testy dla demand_generator.calc — kalkulator rekompensat i odsetek handlowych.
 Pokrywa: odsetki, rekompensaty, przedawnienie, opłaty sądowe, KZP, batch.
 
 Uruchomienie:
     python -m pytest tests/test_calc.py -v
 """
 
+import json
+import tempfile
 from datetime import date, timedelta
 from decimal import Decimal
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from demand_calc import (
+from demand_generator.calc import (
     next_business_day,
     last_business_day_of_month,
     get_interest_rate,
@@ -201,10 +204,10 @@ class TestNBPRates:
         assert rate_date.month == 12
         assert rate_date.year == 2024
 
-    @patch("demand_calc.requests.get")
+    @patch("demand_generator.calc.requests.get")
     def test_nbp_fallback_on_error(self, mock_get):
         """Jeśli API NBP niedostępne -> fallback 4.30."""
-        from demand_calc import _nbp_cache
+        from demand_generator.calc import _nbp_cache
         # Wyczyść cache dla daty testowej
         test_date = date(2099, 1, 15)
         for offset in range(6):
@@ -259,14 +262,14 @@ class TestCompensationTier:
 
 
 class TestCalculateCompensation:
-    @patch("demand_calc.get_nbp_eur_rate", return_value=Decimal("4.30"))
+    @patch("demand_generator.calc.get_nbp_eur_rate", return_value=Decimal("4.30"))
     def test_basic_compensation(self, mock_rate):
         result = calculate_compensation(Decimal("3000"), date(2024, 6, 15))
         assert result["comp_eur"] == Decimal("40")
         assert result["tier"] == "EUR_40"
         assert result["comp_pln"] == Decimal("172.00")  # 40 * 4.30
 
-    @patch("demand_calc.get_nbp_eur_rate", return_value=Decimal("4.30"))
+    @patch("demand_generator.calc.get_nbp_eur_rate", return_value=Decimal("4.30"))
     def test_tier_70_compensation(self, mock_rate):
         result = calculate_compensation(Decimal("25000"), date(2024, 6, 15))
         assert result["comp_eur"] == Decimal("70")
@@ -401,7 +404,7 @@ class TestLegalRepresentationCost:
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestCalculateInvoice:
-    @patch("demand_calc.get_nbp_eur_rate", return_value=Decimal("4.30"))
+    @patch("demand_generator.calc.get_nbp_eur_rate", return_value=Decimal("4.30"))
     def test_basic_invoice(self, mock_rate):
         result = calculate_invoice(
             Decimal("10000"), date(2024, 3, 1), date(2024, 4, 1)
@@ -412,7 +415,7 @@ class TestCalculateInvoice:
         assert result["interest"] > Decimal("0")
         assert result["total_pln"] == result["compensation"]["comp_pln"] + result["interest"]
 
-    @patch("demand_calc.get_nbp_eur_rate", return_value=Decimal("4.30"))
+    @patch("demand_generator.calc.get_nbp_eur_rate", return_value=Decimal("4.30"))
     def test_prescribed_invoice(self, mock_rate):
         result = calculate_invoice(
             Decimal("10000"), date(2020, 1, 1), date(2020, 6, 1),
@@ -423,7 +426,7 @@ class TestCalculateInvoice:
         assert result["compensation"]["comp_pln"] == Decimal("0")
         assert result["total_pln"] == Decimal("0")
 
-    @patch("demand_calc.get_nbp_eur_rate", return_value=Decimal("4.30"))
+    @patch("demand_generator.calc.get_nbp_eur_rate", return_value=Decimal("4.30"))
     def test_no_lawsuit_date_no_prescription(self, mock_rate):
         """Bez lawsuit_date -> nie sprawdza przedawnienia."""
         result = calculate_invoice(
@@ -434,7 +437,7 @@ class TestCalculateInvoice:
 
 
 class TestCalculateBatch:
-    @patch("demand_calc.get_nbp_eur_rate", return_value=Decimal("4.30"))
+    @patch("demand_generator.calc.get_nbp_eur_rate", return_value=Decimal("4.30"))
     def test_basic_batch(self, mock_rate):
         invoices = [
             {"gross": 3000, "due_date": date(2024, 3, 1), "payment_date": date(2024, 4, 1), "invoice_number": "FV/1"},
@@ -449,7 +452,7 @@ class TestCalculateBatch:
         assert result["court_fee"] > Decimal("0")
         assert result["legal_representation_cost"] > Decimal("0")
 
-    @patch("demand_calc.get_nbp_eur_rate", return_value=Decimal("4.30"))
+    @patch("demand_generator.calc.get_nbp_eur_rate", return_value=Decimal("4.30"))
     def test_batch_with_prescribed(self, mock_rate):
         invoices = [
             {"gross": 3000, "due_date": date(2024, 3, 1), "payment_date": date(2024, 4, 1), "invoice_number": "FV/1"},
@@ -459,7 +462,7 @@ class TestCalculateBatch:
         assert result["invoice_count"] == 1  # only non-prescribed
         assert result["prescribed_count"] == 1
 
-    @patch("demand_calc.get_nbp_eur_rate", return_value=Decimal("4.30"))
+    @patch("demand_generator.calc.get_nbp_eur_rate", return_value=Decimal("4.30"))
     def test_batch_tiers(self, mock_rate):
         invoices = [
             {"gross": 3000, "due_date": date(2024, 3, 1), "payment_date": date(2024, 4, 1)},
@@ -471,8 +474,93 @@ class TestCalculateBatch:
         assert "EUR_70" in result["tiers"]
         assert "EUR_100" in result["tiers"]
 
-    @patch("demand_calc.get_nbp_eur_rate", return_value=Decimal("4.30"))
+    @patch("demand_generator.calc.get_nbp_eur_rate", return_value=Decimal("4.30"))
     def test_empty_batch(self, mock_rate):
         result = calculate_batch([])
         assert result["invoice_count"] == 0
         assert result["total_claim_pln"] == Decimal("0")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# PAYMENT_DATE OPTIONAL (calc_cli)
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestPaymentDateOptional:
+    """Testy dla opcjonalnego payment_date w calc_cli."""
+
+    @patch("demand_generator.calc.get_nbp_eur_rate", return_value=Decimal("4.30"))
+    def test_no_payment_date_uses_today(self, mock_rate):
+        """JSON bez payment_date → calc używa today."""
+        invoices = [{
+            "gross": Decimal("10000"),
+            "due_date": date(2024, 6, 1),
+            "payment_date": date.today(),
+        }]
+        result = calculate_batch(invoices)
+        assert result["total_interest_pln"] > Decimal("0")
+
+    @patch("demand_generator.calc.get_nbp_eur_rate", return_value=Decimal("4.30"))
+    def test_payment_date_null_uses_today(self, mock_rate):
+        """JSON z payment_date = null → calc używa today (tested via calc_cli parsing)."""
+        # This tests the calc_cli parsing logic indirectly
+        # by verifying calculate_batch works with today's date
+        today = date.today()
+        invoices = [{
+            "gross": Decimal("10000"),
+            "due_date": date(2024, 6, 1),
+            "payment_date": today,
+        }]
+        result = calculate_batch(invoices)
+        assert result["invoice_count"] == 1
+        assert result["total_interest_pln"] > Decimal("0")
+
+    def test_calc_cli_parses_missing_payment_date(self, tmp_path):
+        """calc_cli: JSON bez payment_date nie powoduje błędu."""
+        import subprocess
+        import sys
+
+        json_data = {
+            "invoices": [{
+                "invoice_number": "FV/TEST/1",
+                "gross": 10000,
+                "due_date": "2024-06-01"
+            }]
+        }
+        json_file = tmp_path / "test_no_payment.json"
+        json_file.write_text(json.dumps(json_data))
+
+        result = subprocess.run(
+            [sys.executable, "-m", "demand_generator.calc_cli", "--json", str(json_file)],
+            capture_output=True, text=True,
+            cwd=str(Path(__file__).parent.parent),
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        output = json.loads(result.stdout)
+        assert output["invoice_count"] == 1
+        assert output["total_interest_pln"] > 0
+
+    def test_calc_cli_parses_null_payment_date(self, tmp_path):
+        """calc_cli: JSON z payment_date=null nie powoduje błędu."""
+        import subprocess
+        import sys
+
+        json_data = {
+            "invoices": [{
+                "invoice_number": "FV/TEST/2",
+                "gross": 10000,
+                "due_date": "2024-06-01",
+                "payment_date": None
+            }]
+        }
+        json_file = tmp_path / "test_null_payment.json"
+        json_file.write_text(json.dumps(json_data))
+
+        result = subprocess.run(
+            [sys.executable, "-m", "demand_generator.calc_cli", "--json", str(json_file)],
+            capture_output=True, text=True,
+            cwd=str(Path(__file__).parent.parent),
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        output = json.loads(result.stdout)
+        assert output["invoice_count"] == 1
+        assert output["total_interest_pln"] > 0

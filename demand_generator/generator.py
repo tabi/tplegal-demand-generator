@@ -21,13 +21,13 @@ from pathlib import Path
 # Normalizacja nazw podmiotów — import z demand_utils (flat)
 # ---------------------------------------------------------------------------
 
-from demand_utils import normalize_entity_name  # noqa: E402
+from demand_generator.utils import normalize_entity_name  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Warianty tonalne — single source of truth in demand_variants.py
 # ---------------------------------------------------------------------------
 
-from demand_variants import (  # noqa: E402
+from demand_generator.variants import (  # noqa: E402
     DEMAND_VARIANTS,
     TEMPLATE_THREAT_ORIGINAL as TEMPLATE_THREAT,
     TEMPLATE_CLOSING_ORIGINAL as TEMPLATE_CLOSING,
@@ -40,7 +40,6 @@ from demand_variants import (  # noqa: E402
 REQUIRED_FIELDS = [
     "creditor_name",
     "debtor_name",
-    "total_compensation_pln",
 ]
 
 # ---------------------------------------------------------------------------
@@ -253,9 +252,15 @@ def fill_template_from_dict(template_path: Path, output_path: Path,
     if not variant:
         raise ValueError(f"Unknown strategy: {strategy}. Available: {', '.join(DEMAND_VARIANTS.keys())}")
 
+    principal_pln = Decimal(str(data.get("total_principal_pln", 0)))
     total_pln = Decimal(str(data.get("total_compensation_pln", 0)))
     interest_pln = Decimal(str(data.get("total_interest_pln", 0)))
-    combined_pln = total_pln + interest_pln
+    combined_pln = principal_pln + total_pln + interest_pln
+
+    # Walidacja: przynajmniej jedna kwota musi być > 0
+    if principal_pln == 0 and total_pln == 0 and interest_pln == 0:
+        raise ValueError("Brak kwot do wezwania (total_principal_pln, total_compensation_pln, total_interest_pln wszystkie = 0)")
+
     tiers = tiers_override or set()
     invoice_numbers = data.get("invoice_numbers", [])
 
@@ -272,6 +277,7 @@ def fill_template_from_dict(template_path: Path, output_path: Path,
             data.get("d_zip"), data.get("d_city")
         ),
         "{{KWOTA_LACZNIE_PLN}}": format_pln(combined_pln),
+        "{{KWOTA_GLOWNA_PLN}}": format_pln(principal_pln) if principal_pln > 0 else "0,00",
         "{{KWOTA_REKOMPENSATY_PLN}}": format_pln(total_pln),
         "{{KWOTA_ODSETKI_PLN}}": format_pln(interest_pln),
         "{{LISTA_FAKTUR}}": ", ".join(invoice_numbers) + "." if invoice_numbers else "___",
@@ -415,8 +421,8 @@ def main():
     parser.add_argument(
         "--template", "-t",
         type=str,
-        required=True,
-        help="Ścieżka do template .docx",
+        default=None,
+        help="Ścieżka do template .docx (domyślnie: bundled wezwanie_template.docx)",
     )
     parser.add_argument(
         "--output", "-o",
@@ -442,7 +448,8 @@ def main():
     with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    template = Path(args.template)
+    from demand_generator import DEFAULT_TEMPLATE
+    template = Path(args.template) if args.template else DEFAULT_TEMPLATE
     output = Path(args.output)
 
     try:
@@ -452,12 +459,15 @@ def main():
         sys.exit(1)
 
     # Podsumowanie
+    principal = Decimal(str(data.get("total_principal_pln", 0)))
     comp = Decimal(str(data.get("total_compensation_pln", 0)))
     interest = Decimal(str(data.get("total_interest_pln", 0)))
-    total = comp + interest
+    total = principal + comp + interest
     print(f"Wezwanie wygenerowane: {output}")
     print(f"  Wierzyciel: {data.get('creditor_name', '?')}")
     print(f"  Dłużnik: {data.get('debtor_name', '?')}")
+    if principal > 0:
+        print(f"  Należność główna: {format_pln(principal)} PLN")
     print(f"  Rekompensaty: {format_pln(comp)} PLN")
     print(f"  Odsetki: {format_pln(interest)} PLN")
     print(f"  Łącznie: {format_pln(total)} PLN")

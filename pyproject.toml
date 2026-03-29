@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tplegal-demand-generator"
-version = "0.1.0"
+version = "0.2.0"
 description = "Demand letter generator & compensation calculator"
 requires-python = ">=3.10"
 dependencies = [
@@ -13,14 +13,11 @@ dependencies = [
 ]
 
 [project.scripts]
-generate-demand = "demand_generator:main"
-calc-rekompensa = "calc_cli:main"
+generate-demand = "demand_generator.generator:main"
+calc-rekompensa = "demand_generator.calc_cli:main"
 
-[tool.setuptools]
-py-modules = [
-    "demand_generator",
-    "demand_calc",
-    "demand_variants",
-    "demand_utils",
-    "calc_cli",
-]
+[tool.setuptools.packages.find]
+include = ["demand_generator*"]
+
+[tool.setuptools.package-data]
+demand_generator = ["templates/*.docx"]

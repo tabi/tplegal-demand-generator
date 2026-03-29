@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Unit testy dla demand_generator.py — generator wezwań do zapłaty.
+Unit testy dla demand_generator.generator — generator wezwań do zapłaty.
 Pokrywa: fill_template_from_dict, walidacja pól, kwota_slownie, helpers.
 
 Uruchomienie:
@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from demand_generator import (
+from demand_generator.generator import (
     fill_template_from_dict,
     kwota_slownie,
     format_pln,
@@ -26,6 +26,7 @@ from demand_generator import (
     _join_zip_city,
     _xml_escape,
 )
+from demand_generator import DEFAULT_TEMPLATE
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +48,7 @@ def mock_template(tmp_path):
 <w:p><w:r><w:t>{{DLUZNIK_ADRES_ULICA}}</w:t></w:r></w:p>
 <w:p><w:r><w:t>{{DLUZNIK_ADRES_MIASTO}}</w:t></w:r></w:p>
 <w:p><w:r><w:t>{{KWOTA_LACZNIE_PLN}}</w:t></w:r></w:p>
+<w:p><w:r><w:t>{{KWOTA_GLOWNA_PLN}}</w:t></w:r></w:p>
 <w:p><w:r><w:t>{{KWOTA_REKOMPENSATY_PLN}}</w:t></w:r></w:p>
 <w:p><w:r><w:t>{{KWOTA_ODSETKI_PLN}}</w:t></w:r></w:p>
 <w:p><w:r><w:t>{{LISTA_FAKTUR}}</w:t></w:r></w:p>
@@ -155,6 +157,113 @@ class TestFillTemplateFromDict:
             output = tmp_path / f"output_{strategy}.docx"
             fill_template_from_dict(mock_template, output, sample_data, strategy=strategy)
             assert output.exists()
+
+    def test_zero_amounts_raises(self, mock_template, tmp_path):
+        """Brak jakichkolwiek kwot -> ValueError."""
+        data = {
+            "creditor_name": "Test Sp. z o.o.",
+            "debtor_name": "Dłużnik S.A.",
+        }
+        output = tmp_path / "output.docx"
+        with pytest.raises(ValueError, match="Brak kwot do wezwania"):
+            fill_template_from_dict(mock_template, output, data)
+
+
+# ---------------------------------------------------------------------------
+# Principal support (total_principal_pln)
+# ---------------------------------------------------------------------------
+
+class TestPrincipalSupport:
+    def test_principal_included_in_combined(self, mock_template, tmp_path):
+        """JSON z total_principal_pln → kwota łączna = principal + comp + interest."""
+        data = {
+            "creditor_name": "Wierzyciel Sp. z o.o.",
+            "debtor_name": "Dłużnik S.A.",
+            "total_principal_pln": 10000,
+            "total_compensation_pln": 500,
+            "total_interest_pln": 200,
+            "invoice_numbers": ["FV/1"],
+        }
+        output = tmp_path / "output.docx"
+        fill_template_from_dict(mock_template, output, data)
+
+        with zipfile.ZipFile(output, "r") as zf:
+            content = zf.read("word/document.xml").decode("utf-8")
+
+        # combined = 10000 + 500 + 200 = 10700 → "10 700,00"
+        assert "10\u00a0700,00" in content
+
+    def test_no_principal_backward_compatible(self, mock_template, tmp_path):
+        """JSON bez total_principal_pln → backward compatible (łączna = comp + interest)."""
+        data = {
+            "creditor_name": "Wierzyciel Sp. z o.o.",
+            "debtor_name": "Dłużnik S.A.",
+            "total_compensation_pln": 500,
+            "total_interest_pln": 200,
+            "invoice_numbers": ["FV/1"],
+        }
+        output = tmp_path / "output.docx"
+        fill_template_from_dict(mock_template, output, data)
+
+        with zipfile.ZipFile(output, "r") as zf:
+            content = zf.read("word/document.xml").decode("utf-8")
+
+        # combined = 0 + 500 + 200 = 700 → "700,00"
+        assert "700,00" in content
+
+    def test_principal_only_no_comp(self, mock_template, tmp_path):
+        """Principal=10000, comp=0, interest=500 → łączna = 10500."""
+        data = {
+            "creditor_name": "Wierzyciel Sp. z o.o.",
+            "debtor_name": "Dłużnik S.A.",
+            "total_principal_pln": 10000,
+            "total_compensation_pln": 0,
+            "total_interest_pln": 500,
+            "invoice_numbers": ["FV/1"],
+        }
+        output = tmp_path / "output.docx"
+        fill_template_from_dict(mock_template, output, data)
+
+        with zipfile.ZipFile(output, "r") as zf:
+            content = zf.read("word/document.xml").decode("utf-8")
+
+        # combined = 10000 + 0 + 500 = 10500 → "10 500,00"
+        assert "10\u00a0500,00" in content
+
+    def test_principal_placeholder_present(self, mock_template, tmp_path):
+        """KWOTA_GLOWNA_PLN placeholder jest wypełniony."""
+        data = {
+            "creditor_name": "Wierzyciel Sp. z o.o.",
+            "debtor_name": "Dłużnik S.A.",
+            "total_principal_pln": 15000,
+            "total_compensation_pln": 300,
+            "total_interest_pln": 100,
+            "invoice_numbers": ["FV/1"],
+        }
+        output = tmp_path / "output.docx"
+        fill_template_from_dict(mock_template, output, data)
+
+        with zipfile.ZipFile(output, "r") as zf:
+            content = zf.read("word/document.xml").decode("utf-8")
+
+        # principal = 15000 → "15 000,00"
+        assert "15\u00a0000,00" in content
+        assert "{{KWOTA_GLOWNA_PLN}}" not in content
+
+
+# ---------------------------------------------------------------------------
+# DEFAULT_TEMPLATE
+# ---------------------------------------------------------------------------
+
+class TestDefaultTemplate:
+    def test_default_template_exists(self):
+        """Bundled template istnieje na dysku."""
+        assert DEFAULT_TEMPLATE.exists(), f"Template not found: {DEFAULT_TEMPLATE}"
+
+    def test_default_template_is_valid_docx(self):
+        """Bundled template jest poprawnym plikiem ZIP/DOCX."""
+        with zipfile.ZipFile(DEFAULT_TEMPLATE, "r") as zf:
+            assert "word/document.xml" in zf.namelist()
 
 
 # ---------------------------------------------------------------------------
