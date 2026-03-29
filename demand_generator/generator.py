@@ -9,6 +9,7 @@ Użycie:
 
 import json
 import os
+import re
 import sys
 import argparse
 import zipfile
@@ -211,6 +212,145 @@ def format_pln(amount) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Format helpers for invoice table
+# ---------------------------------------------------------------------------
+
+def format_pln_zl(amount) -> str:
+    """Formatuje kwotę: 1 234,56 zł (z niełamliwą spacją jako separator tysięcy)."""
+    amount = Decimal(str(amount))
+    integer_part = int(amount)
+    fractional = int(abs(amount - integer_part) * 100)
+    int_str = f"{integer_part:,}".replace(",", "\u00a0")
+    return f"{int_str},{fractional:02d} zł"
+
+
+def format_date_pl(d) -> str:
+    """DD.MM.YYYY from date or ISO string."""
+    if isinstance(d, str):
+        d = date.fromisoformat(d)
+    return f"{d.day:02d}.{d.month:02d}.{d.year}"
+
+
+# ---------------------------------------------------------------------------
+# DOCX table generation — WordprocessingML XML
+# ---------------------------------------------------------------------------
+
+TABLE_COLUMNS = [
+    ("Lp.", 450, "center"),
+    ("Nr faktury", 1500, "left"),
+    ("Kwota brutto", 1150, "right"),
+    ("Termin zapłaty", 1050, "center"),
+    ("Data zapłaty", 1050, "center"),
+    ("Dni opóźnienia", 900, "center"),
+    ("Odsetki", 1100, "right"),
+    ("Rekompensata", 1100, "right"),
+]
+
+FONT_SIZE_HPS = "16"  # 8pt in half-points
+HEADER_BG = "D9D9D9"
+
+
+def _cell_rpr(bold=False, size=FONT_SIZE_HPS):
+    """Run properties for table cells."""
+    parts = [
+        '<w:rPr>',
+        '<w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:cs="Times New Roman"/>',
+    ]
+    if bold:
+        parts.append('<w:b/><w:bCs/>')
+    parts.append(f'<w:sz w:val="{size}"/><w:szCs w:val="{size}"/>')
+    parts.append('</w:rPr>')
+    return ''.join(parts)
+
+
+def _cell_ppr(align="left"):
+    """Paragraph properties for table cells."""
+    jc_map = {"left": "left", "right": "right", "center": "center"}
+    return (
+        f'<w:pPr>'
+        f'<w:spacing w:after="0" w:line="240" w:lineRule="auto"/>'
+        f'<w:jc w:val="{jc_map.get(align, "left")}"/>'
+        f'{_cell_rpr()}'
+        f'</w:pPr>'
+    )
+
+
+def _tc(text: str, width: int, align="left", bold=False, shading=None):
+    """Generate a single table cell XML."""
+    tc_pr = f'<w:tcPr><w:tcW w:w="{width}" w:type="dxa"/>'
+    if shading:
+        tc_pr += f'<w:shd w:val="clear" w:color="auto" w:fill="{shading}"/>'
+    tc_pr += '<w:vAlign w:val="center"/></w:tcPr>'
+
+    rpr = _cell_rpr(bold=bold)
+    escaped_text = _xml_escape(text)
+
+    return (
+        f'<w:tc>{tc_pr}'
+        f'<w:p>{_cell_ppr(align)}'
+        f'<w:r>{rpr}<w:t xml:space="preserve">{escaped_text}</w:t></w:r>'
+        f'</w:p></w:tc>'
+    )
+
+
+def _border_attr(tag):
+    return f'<w:{tag} w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+
+
+def build_invoice_table_xml(invoices_detail: list[dict]) -> str:
+    """
+    Build DOCX XML <w:tbl> for invoice table from invoices_detail list.
+
+    Each item in invoices_detail:
+        invoice_number, gross_amount, due_date, payment_date (or null),
+        delay_days, interest_pln, compensation_pln
+    """
+    borders = ''.join(_border_attr(t) for t in
+                      ['top', 'left', 'bottom', 'right', 'insideH', 'insideV'])
+    grid = ''.join(f'<w:gridCol w:w="{col[1]}"/>' for col in TABLE_COLUMNS)
+
+    tbl_pr = (
+        '<w:tblPr>'
+        '<w:tblStyle w:val="TableGrid"/>'
+        '<w:tblW w:w="0" w:type="auto"/>'
+        '<w:jc w:val="center"/>'
+        f'<w:tblBorders>{borders}</w:tblBorders>'
+        '<w:tblLook w:val="04A0" w:firstRow="1" w:lastRow="0" '
+        'w:firstColumn="0" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/>'
+        '</w:tblPr>'
+    )
+
+    header_cells = ''.join(
+        _tc(col[0], col[1], align="center", bold=True, shading=HEADER_BG)
+        for col in TABLE_COLUMNS
+    )
+    header_row = f'<w:tr><w:trPr><w:tblHeader/></w:trPr>{header_cells}</w:tr>'
+
+    data_rows = []
+    for idx, inv in enumerate(invoices_detail, 1):
+        payment_date = inv.get("payment_date")
+        if payment_date:
+            payment_str = format_date_pl(payment_date)
+        else:
+            payment_str = "\u2014"  # em dash for unpaid
+
+        cells = [
+            _tc(str(idx), TABLE_COLUMNS[0][1], "center"),
+            _tc(inv.get("invoice_number", ""), TABLE_COLUMNS[1][1], "left"),
+            _tc(format_pln_zl(inv.get("gross_amount", 0)), TABLE_COLUMNS[2][1], "right"),
+            _tc(format_date_pl(inv["due_date"]), TABLE_COLUMNS[3][1], "center"),
+            _tc(payment_str, TABLE_COLUMNS[4][1], "center"),
+            _tc(str(inv.get("delay_days", 0)), TABLE_COLUMNS[5][1], "center"),
+            _tc(format_pln_zl(inv.get("interest_pln", 0)), TABLE_COLUMNS[6][1], "right"),
+            _tc(format_pln_zl(inv.get("compensation_pln", 0)), TABLE_COLUMNS[7][1], "right"),
+        ]
+        data_rows.append(f'<w:tr>{"".join(cells)}</w:tr>')
+
+    table = f'<w:tbl>{tbl_pr}<w:tblGrid>{grid}</w:tblGrid>{header_row}{"".join(data_rows)}</w:tbl>'
+    return f'<w:p><w:pPr><w:spacing w:after="0"/></w:pPr></w:p>{table}<w:p><w:pPr><w:spacing w:after="0"/></w:pPr></w:p>'
+
+
+# ---------------------------------------------------------------------------
 # Generator — standalone (dane z dict/JSON)
 # ---------------------------------------------------------------------------
 
@@ -263,6 +403,8 @@ def fill_template_from_dict(template_path: Path, output_path: Path,
 
     tiers = tiers_override or set()
     invoice_numbers = data.get("invoice_numbers", [])
+    invoices_detail = data.get("invoices_detail")
+    use_table = bool(invoices_detail)
 
     placeholders = {
         "{{DATA}}": f"Leszno, dnia {_format_date(date.today())}",
@@ -280,10 +422,13 @@ def fill_template_from_dict(template_path: Path, output_path: Path,
         "{{KWOTA_GLOWNA_PLN}}": format_pln(principal_pln) if principal_pln > 0 else "0,00",
         "{{KWOTA_REKOMPENSATY_PLN}}": format_pln(total_pln),
         "{{KWOTA_ODSETKI_PLN}}": format_pln(interest_pln),
-        "{{LISTA_FAKTUR}}": ", ".join(invoice_numbers) + "." if invoice_numbers else "___",
         "{{NUMER_RACHUNKU}}": data.get("cr_bank", "___"),
         "{{TERMIN_DNI}}": str(variant["deadline_days"]),
     }
+
+    # LISTA_FAKTUR handled separately when invoices_detail is provided
+    if not use_table:
+        placeholders["{{LISTA_FAKTUR}}"] = ", ".join(invoice_numbers) + "." if invoice_numbers else "___"
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = Path(tmpdir)
@@ -301,6 +446,22 @@ def fill_template_from_dict(template_path: Path, output_path: Path,
                 placeholder.encode("utf-8"),
                 _xml_escape(_sanitize_placeholder_value(value)).encode("utf-8"),
             )
+
+        # Replace {{LISTA_FAKTUR}} paragraph with invoice table XML
+        if use_table:
+            table_xml = build_invoice_table_xml(invoices_detail)
+            content_str = content.decode("utf-8")
+
+            # Find the <w:p ...> containing {{LISTA_FAKTUR}} and replace entire paragraph
+            lista_pattern = r'<w:p[> ][^<]*(?:<(?!/w:p>)[^<]*)*\{\{LISTA_FAKTUR\}\}(?:[^<]|<(?!/w:p>))*</w:p>'
+            match = re.search(lista_pattern, content_str, re.DOTALL)
+            if match:
+                content_str = content_str[:match.start()] + table_xml + content_str[match.end():]
+            else:
+                # Fallback: simple text replacement
+                content_str = content_str.replace("{{LISTA_FAKTUR}}", "")
+
+            content = content_str.encode("utf-8")
 
         if strategy != "standard_collect":
             content = content.replace(

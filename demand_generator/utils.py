@@ -2,6 +2,8 @@
 rekompensa — shared utilities.
 """
 
+import re
+
 # ---------------------------------------------------------------------------
 # Normalizacja nazw podmiotów
 # ---------------------------------------------------------------------------
@@ -16,6 +18,18 @@ LOWERCASE_LEGAL = {'ograniczoną', 'odpowiedzialnością', 'jawna', 'jawną',
 KNOWN_ABBREVIATIONS = {'SP.', 'SP', 'O.O.', 'S.A.', 'S.K.A.', 'PHU', 'FHU',
                        'PPHU', 'ZPH', 'P.W.', 'PW', 'NIP', 'KRS', 'WRI', 'ZPO'}
 
+# Post-processing: poprawne skróty form prawnych
+# Order matters: specific (no-space) patterns AFTER general (with-space) patterns
+LEGAL_FORM_FIXES = [
+    (re.compile(r'\bSP\.\s*[zZ]\s*O\.O\.', re.IGNORECASE), 'Sp. z o.o.'),
+    (re.compile(r'\bSP\.\s+K\.', re.IGNORECASE), 'Sp. k.'),   # SP. K. (with space)
+    (re.compile(r'\bSP\.K\.', re.IGNORECASE), 'Sp.k.'),        # SP.K. (no space)
+    (re.compile(r'\bSP\.\s+J\.', re.IGNORECASE), 'Sp. j.'),   # SP. J. (with space)
+    (re.compile(r'\bSP\.J\.', re.IGNORECASE), 'Sp.j.'),        # SP.J. (no space)
+    (re.compile(r'\bS\.A\.'), 'S.A.'),
+    (re.compile(r'\bS\.C\.', re.IGNORECASE), 's.c.'),
+]
+
 
 def normalize_entity_name(name: str) -> str:
     """
@@ -26,6 +40,7 @@ def normalize_entity_name(name: str) -> str:
     2. Przyimek/spójnik (POLISH_STOPWORDS), nie na początku -> z małej
     3. Słowo formy prawnej (LOWERCASE_LEGAL), nie na początku -> z małej
     4. Wszystko inne -> capitalize()
+    5. Post-processing: poprawne skróty form prawnych (Sp. z o.o., Sp.k., etc.)
     """
     words = name.split()
     result = []
@@ -44,4 +59,11 @@ def normalize_entity_name(name: str) -> str:
         # 4. Everything else -> capitalize
         else:
             result.append(word.capitalize())
-    return ' '.join(result)
+
+    name = ' '.join(result)
+
+    # 5. Post-processing: fix legal form abbreviations
+    for pattern, replacement in LEGAL_FORM_FIXES:
+        name = pattern.sub(replacement, name)
+
+    return name

@@ -20,12 +20,16 @@ from demand_generator.generator import (
     fill_template_from_dict,
     kwota_slownie,
     format_pln,
+    format_pln_zl,
+    format_date_pl,
     art_10_reference,
+    build_invoice_table_xml,
     _format_date,
     _join_address,
     _join_zip_city,
     _xml_escape,
 )
+from demand_generator.utils import normalize_entity_name
 from demand_generator import DEFAULT_TEMPLATE
 
 
@@ -112,7 +116,7 @@ class TestFillTemplateFromDict:
         assert "{{" not in content
         assert "}}" not in content
         # Powinny być dane
-        assert "Firma Abc SP. z ograniczoną odpowiedzialnością" in content or "Firma Abc SP." in content
+        assert "Firma Abc Sp. z o.o." in content
         assert "FV/2024/001" in content
 
     def test_missing_required_field_raises(self, mock_template, tmp_path):
@@ -362,3 +366,169 @@ class TestHelpers:
 
     def test_xml_escape(self):
         assert _xml_escape('a & b < c > d "e" \'f\'') == "a &amp; b &lt; c &gt; d &quot;e&quot; &apos;f&apos;"
+
+
+# ---------------------------------------------------------------------------
+# Legal form abbreviation fixes (normalize_entity_name)
+# ---------------------------------------------------------------------------
+
+class TestLegalFormFixes:
+    def test_sp_z_oo(self):
+        assert normalize_entity_name("PARK HOME SP. Z O.O.") == "Park Home Sp. z o.o."
+
+    def test_sp_z_oo_nukka(self):
+        assert normalize_entity_name("NUKKA SP. Z O.O.") == "Nukka Sp. z o.o."
+
+    def test_sp_k(self):
+        assert normalize_entity_name("FIRMA ABC SP.K.") == "Firma Abc Sp.k."
+
+    def test_sp_j(self):
+        assert normalize_entity_name("KANCELARIA TABERT PRZYNICZKA SP.J.") == "Kancelaria Tabert Przyniczka Sp.j."
+
+    def test_sa(self):
+        assert normalize_entity_name("WIELKA FIRMA S.A.") == "Wielka Firma S.A."
+
+    def test_sc(self):
+        assert normalize_entity_name("JAN KOWALSKI S.C.") == "Jan Kowalski s.c."
+
+    def test_full_form_spolka_zoo(self):
+        """Pełna forma 'Spółka z ograniczoną odpowiedzialnością' — bez zmian."""
+        assert normalize_entity_name("FIRMA SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ") == "Firma Spółka z ograniczoną odpowiedzialnością"
+
+    def test_full_form_jawna(self):
+        """Pełna forma 'Spółka jawna' — bez zmian."""
+        assert normalize_entity_name("FIRMA SPÓŁKA JAWNA") == "Firma Spółka jawna"
+
+
+# ---------------------------------------------------------------------------
+# Invoice table generation
+# ---------------------------------------------------------------------------
+
+class TestInvoiceTable:
+    def test_build_table_xml_structure(self):
+        """build_invoice_table_xml generates valid XML with w:tbl."""
+        detail = [
+            {
+                "invoice_number": "FV/1",
+                "gross_amount": 2725.00,
+                "due_date": "2025-01-31",
+                "payment_date": "2025-03-15",
+                "delay_days": 43,
+                "interest_pln": 50.12,
+                "compensation_pln": 169.68,
+            }
+        ]
+        xml = build_invoice_table_xml(detail)
+        assert "<w:tbl>" in xml
+        assert "</w:tbl>" in xml
+        assert "FV/1" in xml
+        assert "2\u00a0725,00 zł" in xml  # gross formatted
+        assert "31.01.2025" in xml  # due_date
+        assert "15.03.2025" in xml  # payment_date
+
+    def test_table_unpaid_invoice_em_dash(self):
+        """Unpaid invoice (payment_date=null) shows em dash."""
+        detail = [
+            {
+                "invoice_number": "FV/2",
+                "gross_amount": 1000.00,
+                "due_date": "2025-02-28",
+                "payment_date": None,
+                "delay_days": 30,
+                "interest_pln": 12.95,
+                "compensation_pln": 172.00,
+            }
+        ]
+        xml = build_invoice_table_xml(detail)
+        assert "\u2014" in xml  # em dash
+
+    def test_table_multiple_rows(self):
+        """Multiple invoices produce multiple rows."""
+        detail = [
+            {
+                "invoice_number": "FV/1",
+                "gross_amount": 1000.00,
+                "due_date": "2025-01-15",
+                "payment_date": "2025-02-15",
+                "delay_days": 31,
+                "interest_pln": 10.00,
+                "compensation_pln": 172.00,
+            },
+            {
+                "invoice_number": "FV/2",
+                "gross_amount": 5000.00,
+                "due_date": "2025-02-15",
+                "payment_date": None,
+                "delay_days": 42,
+                "interest_pln": 30.00,
+                "compensation_pln": 172.00,
+            },
+        ]
+        xml = build_invoice_table_xml(detail)
+        assert "FV/1" in xml
+        assert "FV/2" in xml
+        # Header + 2 data rows = 3 <w:tr>
+        assert xml.count("<w:tr>") == 3
+
+    def test_fill_template_with_invoices_detail(self, mock_template, tmp_path):
+        """invoices_detail → table replaces {{LISTA_FAKTUR}} paragraph."""
+        data = {
+            "creditor_name": "Wierzyciel Sp. z o.o.",
+            "debtor_name": "Dłużnik S.A.",
+            "total_compensation_pln": 169.68,
+            "total_interest_pln": 50.12,
+            "invoices_detail": [
+                {
+                    "invoice_number": "FV/GLO/1/7/25",
+                    "gross_amount": 2725.00,
+                    "due_date": "2025-01-31",
+                    "payment_date": None,
+                    "delay_days": 57,
+                    "interest_pln": 50.12,
+                    "compensation_pln": 169.68,
+                }
+            ],
+        }
+        output = tmp_path / "output.docx"
+        fill_template_from_dict(mock_template, output, data)
+
+        with zipfile.ZipFile(output, "r") as zf:
+            content = zf.read("word/document.xml").decode("utf-8")
+
+        # Table should be present
+        assert "<w:tbl>" in content
+        assert "FV/GLO/1/7/25" in content
+        # Original placeholder paragraph should be gone
+        assert "{{LISTA_FAKTUR}}" not in content
+
+    def test_fill_template_without_invoices_detail_backward_compat(self, mock_template, sample_data, tmp_path):
+        """Without invoices_detail, LISTA_FAKTUR is plain text (backward compat)."""
+        output = tmp_path / "output.docx"
+        fill_template_from_dict(mock_template, output, sample_data)
+
+        with zipfile.ZipFile(output, "r") as zf:
+            content = zf.read("word/document.xml").decode("utf-8")
+
+        # No table
+        assert "<w:tbl>" not in content
+        # Invoice numbers as text
+        assert "FV/2024/001" in content
+        assert "FV/2024/002" in content
+
+
+# ---------------------------------------------------------------------------
+# Format helpers for table
+# ---------------------------------------------------------------------------
+
+class TestFormatHelpers:
+    def test_format_pln_zl(self):
+        assert format_pln_zl(1234.56) == "1\u00a0234,56 zł"
+
+    def test_format_pln_zl_zero(self):
+        assert format_pln_zl(0) == "0,00 zł"
+
+    def test_format_date_pl_string(self):
+        assert format_date_pl("2025-01-31") == "31.01.2025"
+
+    def test_format_date_pl_date(self):
+        assert format_date_pl(date(2025, 3, 15)) == "15.03.2025"
