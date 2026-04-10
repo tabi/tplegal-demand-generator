@@ -16,7 +16,8 @@ LOWERCASE_LEGAL = {'ograniczoną', 'odpowiedzialnością', 'jawna', 'jawną',
                    'cywilna', 'cywilną', 'komandytowo-akcyjna', 'komandytowo-akcyjną'}
 
 KNOWN_ABBREVIATIONS = {'SP.', 'SP', 'O.O.', 'S.A.', 'S.K.A.', 'PHU', 'FHU',
-                       'PPHU', 'ZPH', 'P.W.', 'PW', 'NIP', 'KRS', 'WRI', 'ZPO'}
+                       'PPHU', 'ZPH', 'P.W.', 'PW', 'NIP', 'KRS', 'WRI', 'ZPO',
+                       'S.C.', 'S.J.', 'S.K.', 'P.S.A.', 'SP.J.', 'SP.K.'}
 
 # Post-processing: poprawne skróty form prawnych
 # Order matters: specific (no-space) patterns AFTER general (with-space) patterns

@@ -391,6 +391,21 @@ class TestLegalFormFixes:
     def test_sc(self):
         assert normalize_entity_name("JAN KOWALSKI S.C.") == "Jan Kowalski s.c."
 
+    def test_sj(self):
+        assert normalize_entity_name("KOWALSKI NOWAK S.J.") == "Kowalski Nowak S.J."
+
+    def test_sk(self):
+        assert normalize_entity_name("BUDMAX S.K.") == "Budmax S.K."
+
+    def test_psa(self):
+        assert normalize_entity_name("STARTUP TECH P.S.A.") == "Startup Tech P.S.A."
+
+    def test_sp_j_with_space(self):
+        assert normalize_entity_name("KANCELARIA ABC SP. J.") == "Kancelaria Abc Sp. j."
+
+    def test_sp_k_with_space(self):
+        assert normalize_entity_name("TRANSPORT XYZ SP. K.") == "Transport Xyz Sp. k."
+
     def test_full_form_spolka_zoo(self):
         """Pełna forma 'Spółka z ograniczoną odpowiedzialnością' — bez zmian."""
         assert normalize_entity_name("FIRMA SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ") == "Firma Spółka z ograniczoną odpowiedzialnością"
