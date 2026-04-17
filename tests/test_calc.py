@@ -34,6 +34,7 @@ from demand_generator.calc import (
     legal_representation_cost,
     calculate_invoice,
     calculate_batch,
+    calculate_civil_interest_for_invoice,
 )
 
 
@@ -538,6 +539,8 @@ class TestPaymentDateOptional:
         output = json.loads(result.stdout)
         assert output["invoice_count"] == 1
         assert output["total_interest_pln"] > 0
+        # backwards-compat sanity: total_civil_interest_pln musi być wystawiane
+        assert "total_civil_interest_pln" in output
 
     def test_calc_cli_parses_null_payment_date(self, tmp_path):
         """calc_cli: JSON z payment_date=null nie powoduje błędu."""
@@ -564,3 +567,95 @@ class TestPaymentDateOptional:
         output = json.loads(result.stdout)
         assert output["invoice_count"] == 1
         assert output["total_interest_pln"] > 0
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# ODSETKI KC OD REKOMPENSATY (art. 481 § 2 KC) — integracja w calc.py
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestCivilInterestForInvoice:
+    def test_zero_when_compensation_zero(self):
+        result = calculate_civil_interest_for_invoice(
+            Decimal("0"), date(2023, 6, 1), date(2026, 4, 15)
+        )
+        assert result == Decimal("0")
+
+    def test_positive_when_valid_period(self):
+        # 275 PLN rekompensaty, 6+ miesięcy naliczania
+        result = calculate_civil_interest_for_invoice(
+            Decimal("275"), date(2023, 6, 1), date(2024, 1, 1)
+        )
+        assert result > Decimal("0")
+
+    def test_default_cutoff_is_today(self):
+        # cutoff=None -> date.today()
+        result = calculate_civil_interest_for_invoice(
+            Decimal("275"), date(2023, 6, 1)
+        )
+        assert result > Decimal("0")
+
+    def test_zero_when_due_date_in_future(self):
+        future = date.today() + timedelta(days=365)
+        result = calculate_civil_interest_for_invoice(
+            Decimal("275"), future
+        )
+        assert result == Decimal("0")
+
+
+class TestCalculateInvoiceCivilInterest:
+    def test_invoice_result_has_civil_interest_key(self):
+        calc = calculate_invoice(
+            gross=Decimal("10000"),
+            due_date=date(2023, 6, 1),
+            payment_date=date(2023, 8, 1),
+            cutoff_date=date(2024, 1, 1),
+        )
+        assert "civil_interest" in calc
+        assert isinstance(calc["civil_interest"], Decimal)
+        assert calc["civil_interest"] > Decimal("0")
+
+    def test_total_pln_excludes_civil_interest(self):
+        # Kontrakt: total_pln = comp + interest handlowe (BEZ civil_interest).
+        # Civil_interest jest osobnym polem — caller sumuje ręcznie.
+        calc = calculate_invoice(
+            gross=Decimal("10000"),
+            due_date=date(2023, 6, 1),
+            payment_date=date(2023, 8, 1),
+            cutoff_date=date(2024, 1, 1),
+        )
+        assert calc["total_pln"] == calc["compensation"]["comp_pln"] + calc["interest"]
+        assert calc["civil_interest"] > Decimal("0")
+
+    def test_prescribed_invoice_zero_civil_interest(self):
+        # Faktura sprzed 10 lat + lawsuit_date dziś -> w pełni przedawnione
+        calc = calculate_invoice(
+            gross=Decimal("10000"),
+            due_date=date(2015, 6, 1),
+            payment_date=date(2015, 9, 1),
+            lawsuit_date=date(2026, 4, 15),
+        )
+        assert calc["prescription_status"] == "PRZEDAWNIONE"
+        assert calc["civil_interest"] == Decimal("0")
+
+
+class TestCalculateBatchCivilInterest:
+    def test_batch_has_total_civil_interest_pln(self):
+        invoices = [
+            {"gross": 10000, "due_date": date(2023, 6, 1), "payment_date": date(2023, 8, 1)},
+            {"gross": 60000, "due_date": date(2024, 1, 15), "payment_date": date(2024, 3, 1)},
+        ]
+        result = calculate_batch(invoices, cutoff_date=date(2026, 4, 15))
+        assert "total_civil_interest_pln" in result
+        assert result["total_civil_interest_pln"] > Decimal("0")
+
+    def test_total_claim_excludes_civil_interest(self):
+        # Kontrakt: total_claim_pln = comp + interest handlowe (BEZ civil).
+        # total_civil_interest_pln jest osobnym polem — generator sumuje w combined.
+        invoices = [
+            {"gross": 10000, "due_date": date(2023, 6, 1), "payment_date": date(2023, 8, 1)},
+        ]
+        result = calculate_batch(invoices, cutoff_date=date(2026, 4, 15))
+        assert result["total_claim_pln"] == (
+            result["total_compensation_pln"] + result["total_interest_pln"]
+        )
+        assert result["total_civil_interest_pln"] > Decimal("0")

@@ -395,11 +395,15 @@ def fill_template_from_dict(template_path: Path, output_path: Path,
     principal_pln = Decimal(str(data.get("total_principal_pln", 0)))
     total_pln = Decimal(str(data.get("total_compensation_pln", 0)))
     interest_pln = Decimal(str(data.get("total_interest_pln", 0)))
-    combined_pln = principal_pln + total_pln + interest_pln
+    civil_interest_pln = Decimal(str(data.get("total_civil_interest_pln", 0)))
+    combined_pln = principal_pln + total_pln + interest_pln + civil_interest_pln
 
     # Walidacja: przynajmniej jedna kwota musi być > 0
-    if principal_pln == 0 and total_pln == 0 and interest_pln == 0:
-        raise ValueError("Brak kwot do wezwania (total_principal_pln, total_compensation_pln, total_interest_pln wszystkie = 0)")
+    if principal_pln == 0 and total_pln == 0 and interest_pln == 0 and civil_interest_pln == 0:
+        raise ValueError(
+            "Brak kwot do wezwania (total_principal_pln, total_compensation_pln, "
+            "total_interest_pln, total_civil_interest_pln wszystkie = 0)"
+        )
 
     tiers = tiers_override or set()
     invoice_numbers = data.get("invoice_numbers", [])
@@ -422,6 +426,7 @@ def fill_template_from_dict(template_path: Path, output_path: Path,
         "{{KWOTA_GLOWNA_PLN}}": format_pln(principal_pln) if principal_pln > 0 else "0,00",
         "{{KWOTA_REKOMPENSATY_PLN}}": format_pln(total_pln),
         "{{KWOTA_ODSETKI_PLN}}": format_pln(interest_pln),
+        "{{KWOTA_ODSETKI_KC_PLN}}": format_pln(civil_interest_pln),
         "{{NUMER_RACHUNKU}}": data.get("cr_bank", "___"),
         "{{TERMIN_DNI}}": str(variant["deadline_days"]),
     }
@@ -623,14 +628,17 @@ def main():
     principal = Decimal(str(data.get("total_principal_pln", 0)))
     comp = Decimal(str(data.get("total_compensation_pln", 0)))
     interest = Decimal(str(data.get("total_interest_pln", 0)))
-    total = principal + comp + interest
+    civil_interest = Decimal(str(data.get("total_civil_interest_pln", 0)))
+    total = principal + comp + interest + civil_interest
     print(f"Wezwanie wygenerowane: {output}")
     print(f"  Wierzyciel: {data.get('creditor_name', '?')}")
     print(f"  Dłużnik: {data.get('debtor_name', '?')}")
     if principal > 0:
         print(f"  Należność główna: {format_pln(principal)} PLN")
     print(f"  Rekompensaty: {format_pln(comp)} PLN")
-    print(f"  Odsetki: {format_pln(interest)} PLN")
+    print(f"  Odsetki (art. 7): {format_pln(interest)} PLN")
+    if civil_interest > 0:
+        print(f"  Odsetki od rekompensaty (art. 481 § 2 KC): {format_pln(civil_interest)} PLN")
     print(f"  Łącznie: {format_pln(total)} PLN")
     print(f"  Strategia: {args.strategy}")
     print(f"  Termin: {DEMAND_VARIANTS[args.strategy]['deadline_days']} dni")
