@@ -5,8 +5,10 @@ Moduł reusable: importowany przez generator wezwań, generator pozwów, raport 
 
 Podstawa prawna:
     - Art. 7 ust. 1 ustawy z 8.03.2013 o przeciwdziałaniu nadmiernym opóźnieniom
-      w transakcjach handlowych (t.j. Dz.U. 2023 poz. 1790) — odsetki
+      w transakcjach handlowych (t.j. Dz.U. 2023 poz. 1790) — odsetki od należności głównej
     - Art. 10 ust. 1 i 1a tamże — rekompensaty
+    - Art. 481 § 2 KC — odsetki ustawowe za opóźnienie od kwoty rekompensaty
+      (zob. wyrok SO Białystok VII Ga 377/25 z 28.11.2025)
     - Art. 118 KC — przedawnienie (3 lata + reguła końca roku)
 """
 
@@ -303,6 +305,51 @@ def calculate_compensation(gross: Decimal, due_date: date) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# ODSETKI USTAWOWE OD REKOMPENSATY (art. 481 § 2 KC)
+# ═══════════════════════════════════════════════════════════════════════
+
+def calculate_civil_interest_for_invoice(
+    compensation_pln: Decimal,
+    due_date: date,
+    cutoff_date: Optional[date] = None,
+) -> Decimal:
+    """
+    Thin wrapper na civil_interest.calculate_civil_interest.
+    Liczy odsetki ustawowe za opóźnienie (art. 481 § 2 KC) od kwoty rekompensaty
+    za okres [due_date+1, cutoff_date).
+
+    Podstawa: wyrok SO Białystok VII Ga 377/25 z 28.11.2025 — rekompensata
+    art. 10 staje się wymagalna wraz z opóźnieniem w zapłacie należności
+    głównej, a od tej daty wierzycielowi przysługują odsetki ustawowe KC
+    (NIE handlowe art. 7 UPNOTH).
+
+    Args:
+        compensation_pln: kwota rekompensaty PLN
+        due_date: termin płatności faktury (dzień wymagalności rekompensaty)
+        cutoff_date: dzień naliczania do (None → date.today())
+
+    Returns:
+        Decimal('0') gdy compensation_pln == 0, due_date >= cutoff_date,
+        lub gdy due_date+1 jest przed zakresem tabeli CIVIL_INTEREST_RATES
+        (np. faktury sprzed 08.09.2022 — graceful fallback, bez raise).
+    """
+    from demand_generator.civil_interest import calculate_civil_interest
+    if cutoff_date is None:
+        cutoff_date = date.today()
+    try:
+        return calculate_civil_interest(
+            amount_pln=compensation_pln,
+            start_date=due_date + timedelta(days=1),
+            end_date=cutoff_date,
+        )
+    except ValueError:
+        # start_date przed zakresem tabeli stawek — zwracamy 0 zamiast crashować
+        # batcha. Faktury pre-2022 nie powinny mieć civil interest w tym module;
+        # jeśli potrzebujesz, rozszerz CIVIL_INTEREST_RATES wstecz.
+        return Decimal("0")
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # PRZEDAWNIENIE (art. 118 KC)
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -413,22 +460,27 @@ def calculate_invoice(
     due_date: date,
     payment_date: date,
     lawsuit_date: Optional[date] = None,
+    cutoff_date: Optional[date] = None,
 ) -> dict:
     """
-    Pełna kalkulacja dla jednej faktury: rekompensata + odsetki + przedawnienie.
+    Pełna kalkulacja dla jednej faktury: rekompensata + odsetki handlowe
+    (art. 7 UPNOTH) + odsetki KC od rekompensaty (art. 481 § 2 KC) + przedawnienie.
 
     Args:
         gross: kwota brutto
         due_date: termin płatności (po art. 115 KC)
         payment_date: data zapłaty
         lawsuit_date: planowana data pozwu (None = bez filtra przedawnienia)
+        cutoff_date: dzień do którego liczymy odsetki KC od rekompensaty
+            (None = date.today())
 
     Returns:
         {
             "compensation": {...},          # z calculate_compensation
-            "interest": Decimal,            # kwota odsetek PLN
+            "interest": Decimal,            # kwota odsetek handlowych PLN (art. 7)
             "interest_detailed": {...},     # z calculate_interest_detailed
-            "total_pln": Decimal,           # compensation_pln + interest
+            "civil_interest": Decimal,      # odsetki KC od rekompensaty (art. 481 § 2)
+            "total_pln": Decimal,           # compensation_pln + interest (BEZ civil_interest)
             "prescription_status": str,     # NIEPRZEDAWNIONE / CZESCIOWE / PRZEDAWNIONE
             "prescribed_days": int,
             "delay_days": int,
@@ -452,10 +504,11 @@ def calculate_invoice(
         result["compensation"]["comp_pln"] = Decimal("0")
         result["interest"] = Decimal("0")
         result["interest_detailed"] = {"total": Decimal("0"), "periods": []}
+        result["civil_interest"] = Decimal("0")
         result["total_pln"] = Decimal("0")
         return result
 
-    # Odsetki z ewentualnym kroczącym przedawnieniem
+    # Odsetki handlowe z ewentualnym kroczącym przedawnieniem
     adjusted_start = interest_start
     if lawsuit_date:
         earliest = find_earliest_non_prescribed_interest_date(interest_start, lawsuit_date)
@@ -471,6 +524,14 @@ def calculate_invoice(
     )
     result["interest"] = result["interest_detailed"]["total"]
 
+    # Odsetki KC od rekompensaty (art. 481 § 2) — liczone od due_date+1 do cutoff.
+    # UWAGA: civil_interest jest OSOBNYM polem. total_pln zachowuje starą
+    # semantykę (comp + interest handlowe) — żeby nie łamać existing callerów.
+    # Sumę z odsetkami KC czytelnik robi sam: comp_pln + interest + civil_interest.
+    result["civil_interest"] = calculate_civil_interest_for_invoice(
+        result["compensation"]["comp_pln"], due_date, cutoff_date
+    )
+
     result["total_pln"] = result["compensation"]["comp_pln"] + result["interest"]
 
     return result
@@ -479,6 +540,7 @@ def calculate_invoice(
 def calculate_batch(
     invoices: list[dict],
     lawsuit_date: Optional[date] = None,
+    cutoff_date: Optional[date] = None,
 ) -> dict:
     """
     Kalkulacja batcha faktur.
@@ -490,14 +552,17 @@ def calculate_batch(
             - payment_date (date): data zapłaty
             - invoice_number (str, optional): numer faktury
         lawsuit_date: planowana data pozwu
+        cutoff_date: dzień naliczania odsetek KC od rekompensaty
+            (None = date.today())
 
     Returns:
         {
             "invoices": [calculate_invoice result per invoice + invoice_number],
             "total_compensation_eur": Decimal,
             "total_compensation_pln": Decimal,
-            "total_interest_pln": Decimal,
-            "total_claim_pln": Decimal,
+            "total_interest_pln": Decimal,          # odsetki handlowe (art. 7)
+            "total_civil_interest_pln": Decimal,    # odsetki KC od rekompensaty (art. 481 § 2)
+            "total_claim_pln": Decimal,             # compensation + interest handlowe (BEZ civil)
             "wps": Decimal,
             "court_fee": Decimal,
             "legal_representation_cost": Decimal,
@@ -511,6 +576,7 @@ def calculate_batch(
     total_comp_eur = Decimal("0")
     total_comp_pln = Decimal("0")
     total_interest = Decimal("0")
+    total_civil_interest = Decimal("0")
     prescribed_count = 0
     partial_count = 0
     tiers = set()
@@ -521,6 +587,7 @@ def calculate_batch(
             due_date=inv["due_date"],
             payment_date=inv["payment_date"],
             lawsuit_date=lawsuit_date,
+            cutoff_date=cutoff_date,
         )
         calc["invoice_number"] = inv.get("invoice_number", "")
 
@@ -530,6 +597,7 @@ def calculate_batch(
             total_comp_eur += calc["compensation"]["comp_eur"]
             total_comp_pln += calc["compensation"]["comp_pln"]
             total_interest += calc["interest"]
+            total_civil_interest += calc["civil_interest"]
             tiers.add(calc["compensation"]["tier"])
 
             if calc["prescription_status"] == "CZESCIOWE_PRZEDAWNIENIE":
@@ -537,6 +605,9 @@ def calculate_batch(
 
         results.append(calc)
 
+    # total_claim_pln / wps zachowują starą semantykę (comp + odsetki handlowe),
+    # żeby nie łamać testów i existing readerów. Odsetki KC są OSOBNO
+    # w total_civil_interest_pln; sumę z nimi robi caller.
     total_claim = total_comp_pln + total_interest
     wps = total_claim
 
@@ -545,6 +616,7 @@ def calculate_batch(
         "total_compensation_eur": total_comp_eur,
         "total_compensation_pln": total_comp_pln.quantize(Decimal("0.01")),
         "total_interest_pln": total_interest.quantize(Decimal("0.01")),
+        "total_civil_interest_pln": total_civil_interest.quantize(Decimal("0.01")),
         "total_claim_pln": total_claim.quantize(Decimal("0.01")),
         "wps": wps.quantize(Decimal("0.01")),
         "court_fee": court_fee(wps),
