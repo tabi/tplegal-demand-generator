@@ -571,6 +571,65 @@ def _repack_docx(unpack_dir: Path, output_path: Path, original_path: Path):
 
 
 # ---------------------------------------------------------------------------
+# GUS enrichment — nadpisuje nazwę/adres danymi z REGON po NIP
+# ---------------------------------------------------------------------------
+
+MISSING_DATA_MARKER = "**[BRAK DANYCH — UZUPEŁNIJ]**"
+
+# (nip_key, field_map) — field_map: klucz GUS → klucz JSON
+_GUS_ENRICH_SPEC = [
+    ("cr_nip", {
+        "name": "creditor_name",
+        "street": "cr_street",
+        "city": "cr_city",
+        "zip": "cr_zip",
+    }),
+    ("d_nip", {
+        "name": "debtor_name",
+        "street": "d_street",
+        "city": "d_city",
+        "zip": "d_zip",
+    }),
+]
+
+
+def _enrich_from_gus(data: dict) -> dict:
+    """Dla każdego podanego NIP-u woła GUS i nadpisuje pola nazwy/adresu.
+
+    Logika per strona:
+    - NIP w JSON i GUS odpowiedział → nadpisz name/street/city/zip danymi z GUS
+    - NIP w JSON i GUS padł (3 porażki) lub NIP nie znaleziony → zachowaj
+      wartości z JSON, a brakujące uzupełnij MISSING_DATA_MARKER
+    - NIP-u brak → zachowaj JSON, brakujące → MISSING_DATA_MARKER
+    """
+    from demand_generator.gus_lookup import lookup_by_nip, GUSLookupError
+
+    for nip_key, field_map in _GUS_ENRICH_SPEC:
+        nip = data.get(nip_key)
+        gus = None
+        if nip:
+            try:
+                gus = lookup_by_nip(nip)
+                if gus is None:
+                    print(
+                        f"GUS: NIP {nip} nie znaleziony w REGON — fallback na dane z JSON",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(f"GUS: {nip_key}={nip} → {gus['name']}", file=sys.stderr)
+            except GUSLookupError as e:
+                print(f"GUS: {e} — fallback na dane z JSON", file=sys.stderr)
+
+        for gus_key, json_key in field_map.items():
+            if gus and gus.get(gus_key):
+                data[json_key] = gus[gus_key]
+            elif not data.get(json_key):
+                data[json_key] = MISSING_DATA_MARKER
+
+    return data
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -617,6 +676,9 @@ def main():
     from demand_generator import DEFAULT_TEMPLATE
     template = Path(args.template) if args.template else DEFAULT_TEMPLATE
     output = Path(args.output)
+
+    # GUS enrichment: nadpisuje creditor/debtor name+address jeśli podano cr_nip/d_nip
+    data = _enrich_from_gus(data)
 
     try:
         fill_template_from_dict(template, output, data, strategy=args.strategy)
