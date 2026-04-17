@@ -11,3 +11,8 @@ build/
 *.egg
 .pytest_cache/
 .DS_Store
+
+# flat duplikaty ze starego layoutu (demand_generator/* jest source of truth)
+/demand_calc.py
+/demand_utils.py
+/demand_variants.py
