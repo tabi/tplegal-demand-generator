@@ -336,13 +336,13 @@ def build_invoice_table_xml(invoices_detail: list[dict]) -> str:
 
         cells = [
             _tc(str(idx), TABLE_COLUMNS[0][1], "center"),
-            _tc(inv.get("invoice_number", ""), TABLE_COLUMNS[1][1], "left"),
-            _tc(format_pln_zl(inv.get("gross_amount", 0)), TABLE_COLUMNS[2][1], "right"),
+            _tc(inv.get("invoice_number", ""), TABLE_COLUMNS[1][1], "center"),
+            _tc(format_pln_zl(inv.get("gross_amount", 0)), TABLE_COLUMNS[2][1], "center"),
             _tc(format_date_pl(inv["due_date"]), TABLE_COLUMNS[3][1], "center"),
             _tc(payment_str, TABLE_COLUMNS[4][1], "center"),
             _tc(str(inv.get("delay_days", 0)), TABLE_COLUMNS[5][1], "center"),
-            _tc(format_pln_zl(inv.get("interest_pln", 0)), TABLE_COLUMNS[6][1], "right"),
-            _tc(format_pln_zl(inv.get("compensation_pln", 0)), TABLE_COLUMNS[7][1], "right"),
+            _tc(format_pln_zl(inv.get("interest_pln", 0)), TABLE_COLUMNS[6][1], "center"),
+            _tc(format_pln_zl(inv.get("compensation_pln", 0)), TABLE_COLUMNS[7][1], "center"),
         ]
         data_rows.append(f'<w:tr>{"".join(cells)}</w:tr>')
 
