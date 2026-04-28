@@ -102,6 +102,47 @@ def get_interest_rate(d: date) -> float:
     return INTEREST_RATES[-1]["rate"]
 
 
+def _interest_start_date(due_date: date, interest_start_override: Optional[date]) -> date:
+    """Pierwszy dzień naliczania odsetek po uwzględnieniu override."""
+    return interest_start_override if interest_start_override else due_date + timedelta(days=1)
+
+
+def _interest_rate_period_end(current: date, payment_date: date) -> date:
+    """Koniec podokresu dla stawki obowiązującej w dniu current."""
+    for r in INTEREST_RATES:
+        if r["from_d"] <= current <= r["to_d"]:
+            return min(payment_date, r["to_d"])
+    return payment_date
+
+
+def _iter_interest_periods(
+    gross: Decimal,
+    start_date: date,
+    payment_date: date,
+) -> list[dict]:
+    """Podziel okres naliczania na podokresy stawek i policz kwoty."""
+    periods = []
+    current = start_date
+
+    while current <= payment_date:
+        rate = get_interest_rate(current)
+        period_end = _interest_rate_period_end(current, payment_date)
+        days = (period_end - current).days + 1
+        raw_amount = gross * Decimal(str(rate)) / Decimal("100") * Decimal(str(days)) / Decimal("365")
+
+        periods.append({
+            "from": current,
+            "to": period_end,
+            "days": days,
+            "rate": rate,
+            "raw_amount": raw_amount,
+            "amount": raw_amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
+        })
+        current = period_end + timedelta(days=1)
+
+    return periods
+
+
 def calculate_interest(
     gross: Decimal,
     due_date: date,
@@ -126,26 +167,14 @@ def calculate_interest(
     if payment_date <= due_date:
         return Decimal("0")
 
-    total = Decimal("0")
-    current = interest_start_override if interest_start_override else (due_date + timedelta(days=1))
-
-    if current > payment_date:
+    start_date = _interest_start_date(due_date, interest_start_override)
+    if start_date > payment_date:
         return Decimal("0")
 
-    while current <= payment_date:
-        rate = get_interest_rate(current)
-
-        # Koniec bieżącego podokresu stawki
-        period_end = payment_date
-        for r in INTEREST_RATES:
-            if r["from_d"] <= current <= r["to_d"]:
-                period_end = min(payment_date, r["to_d"])
-                break
-
-        days = (period_end - current).days + 1
-        interest = gross * Decimal(str(rate)) / Decimal("100") * Decimal(str(days)) / Decimal("365")
-        total += interest
-        current = period_end + timedelta(days=1)
+    total = sum(
+        (period["raw_amount"] for period in _iter_interest_periods(gross, start_date, payment_date)),
+        Decimal("0"),
+    )
 
     return total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
@@ -172,36 +201,22 @@ def calculate_interest_detailed(
     if payment_date <= due_date:
         return result
 
-    current = interest_start_override if interest_start_override else (due_date + timedelta(days=1))
-    if current > payment_date:
+    start_date = _interest_start_date(due_date, interest_start_override)
+    if start_date > payment_date:
         return result
 
-    result["start_date"] = current
+    result["start_date"] = start_date
     result["end_date"] = payment_date
 
-    while current <= payment_date:
-        rate = get_interest_rate(current)
-
-        period_end = payment_date
-        for r in INTEREST_RATES:
-            if r["from_d"] <= current <= r["to_d"]:
-                period_end = min(payment_date, r["to_d"])
-                break
-
-        days = (period_end - current).days + 1
-        amount = (gross * Decimal(str(rate)) / Decimal("100") * Decimal(str(days)) / Decimal("365")).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
-        )
-
+    for period in _iter_interest_periods(gross, start_date, payment_date):
         result["periods"].append({
-            "from": current,
-            "to": period_end,
-            "days": days,
-            "rate": rate,
-            "amount": amount,
+            "from": period["from"],
+            "to": period["to"],
+            "days": period["days"],
+            "rate": period["rate"],
+            "amount": period["amount"],
         })
-        result["total"] += amount
-        current = period_end + timedelta(days=1)
+        result["total"] += period["amount"]
 
     result["total"] = result["total"].quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     return result

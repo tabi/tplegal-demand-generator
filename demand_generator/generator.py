@@ -350,65 +350,38 @@ def build_invoice_table_xml(invoices_detail: list[dict]) -> str:
     return f'<w:p><w:pPr><w:spacing w:after="0"/></w:pPr></w:p>{table}<w:p><w:pPr><w:spacing w:after="0"/></w:pPr></w:p>'
 
 
-# ---------------------------------------------------------------------------
-# Generator — standalone (dane z dict/JSON)
-# ---------------------------------------------------------------------------
-
-def fill_template_from_dict(template_path: Path, output_path: Path,
-                            data: dict, strategy: str = "standard_collect"):
-    """
-    Wypełnia template danymi z dict (bez bazy).
-    Użyteczne do testowania i do integracji z innymi systemami.
-
-    Wymagane klucze w data:
-        creditor_name, cr_street, cr_city, cr_zip, cr_bank,
-        debtor_name, d_street, d_city, d_zip,
-        total_compensation_pln, assigned_to,
-        invoice_numbers (list[str]), invoice_tiers (set[str])
-
-    Raises:
-        ValueError: jeśli brakuje wymaganych kluczy lub strategia jest nieznana
-        FileNotFoundError: jeśli template nie istnieje
-    """
-    # Walidacja template
-    template_path = Path(template_path)
+def _validate_template_input(template_path: Path, data: dict) -> None:
     if not template_path.exists():
         raise FileNotFoundError(f"Template not found: {template_path}")
 
-    # Walidacja wymaganych pól
     missing = [f for f in REQUIRED_FIELDS if f not in data or data[f] is None]
     if missing:
         raise ValueError(f"Missing required fields: {', '.join(missing)}")
 
-    case = data
-    invoices = [
-        {"invoice_number": n, "compensation_tier": None}
-        for n in data.get("invoice_numbers", [])
-    ]
-    # Nadpisz tiers jeśli podane
-    tiers_override = data.get("invoice_tiers")
 
+def _get_strategy_variant(strategy: str) -> dict:
     variant = DEMAND_VARIANTS.get(strategy)
     if not variant:
         raise ValueError(f"Unknown strategy: {strategy}. Available: {', '.join(DEMAND_VARIANTS.keys())}")
+    return variant
 
-    principal_pln = Decimal(str(data.get("total_principal_pln", 0)))
-    total_pln = Decimal(str(data.get("total_compensation_pln", 0)))
-    interest_pln = Decimal(str(data.get("total_interest_pln", 0)))
-    civil_interest_pln = Decimal(str(data.get("total_civil_interest_pln", 0)))
+
+def _money_value(data: dict, key: str) -> Decimal:
+    return Decimal(str(data.get(key, 0)))
+
+
+def _build_placeholders(data: dict, variant: dict, use_table: bool) -> dict[str, str]:
+    principal_pln = _money_value(data, "total_principal_pln")
+    total_pln = _money_value(data, "total_compensation_pln")
+    interest_pln = _money_value(data, "total_interest_pln")
+    civil_interest_pln = _money_value(data, "total_civil_interest_pln")
     combined_pln = principal_pln + total_pln + interest_pln + civil_interest_pln
 
-    # Walidacja: przynajmniej jedna kwota musi być > 0
     if principal_pln == 0 and total_pln == 0 and interest_pln == 0 and civil_interest_pln == 0:
         raise ValueError(
             "Brak kwot do wezwania (total_principal_pln, total_compensation_pln, "
             "total_interest_pln, total_civil_interest_pln wszystkie = 0)"
         )
-
-    tiers = tiers_override or set()
-    invoice_numbers = data.get("invoice_numbers", [])
-    invoices_detail = data.get("invoices_detail")
-    use_table = bool(invoices_detail)
 
     placeholders = {
         "{{DATA}}": f"Leszno, dnia {_format_date(date.today())}",
@@ -431,9 +404,84 @@ def fill_template_from_dict(template_path: Path, output_path: Path,
         "{{TERMIN_DNI}}": str(variant["deadline_days"]),
     }
 
-    # LISTA_FAKTUR handled separately when invoices_detail is provided
     if not use_table:
+        invoice_numbers = data.get("invoice_numbers", [])
         placeholders["{{LISTA_FAKTUR}}"] = ", ".join(invoice_numbers) + "." if invoice_numbers else "___"
+
+    return placeholders
+
+
+def _replace_placeholders(content: bytes, placeholders: dict[str, str]) -> bytes:
+    for placeholder, value in placeholders.items():
+        content = content.replace(
+            placeholder.encode("utf-8"),
+            _xml_escape(_sanitize_placeholder_value(value)).encode("utf-8"),
+        )
+    return content
+
+
+def _replace_invoice_list_with_table(content: bytes, invoices_detail: list[dict]) -> bytes:
+    table_xml = build_invoice_table_xml(invoices_detail)
+    content_str = content.decode("utf-8")
+
+    pattern = r'<w:p[> ][^<]*(?:<(?!/w:p>)[^<]*)*\{\{LISTA_FAKTUR\}\}(?:[^<]|<(?!/w:p>))*</w:p>'
+    match = re.search(pattern, content_str, re.DOTALL)
+    if match:
+        content_str = content_str[:match.start()] + table_xml + content_str[match.end():]
+    else:
+        content_str = content_str.replace("{{LISTA_FAKTUR}}", "")
+
+    return content_str.encode("utf-8")
+
+
+def _apply_strategy_variant(content: bytes, strategy: str, variant: dict) -> bytes:
+    if strategy == "standard_collect":
+        return content
+
+    content = content.replace(
+        TEMPLATE_THREAT.encode("utf-8"),
+        _xml_escape(variant["threat_paragraph"]).encode("utf-8"),
+    )
+    return content.replace(
+        TEMPLATE_CLOSING.encode("utf-8"),
+        _xml_escape(variant["closing_paragraph"]).encode("utf-8"),
+    )
+
+
+def _render_document_xml(content: bytes, data: dict, strategy: str, variant: dict) -> bytes:
+    invoices_detail = data.get("invoices_detail")
+    placeholders = _build_placeholders(data, variant, use_table=bool(invoices_detail))
+
+    content = _replace_placeholders(content, placeholders)
+    if invoices_detail:
+        content = _replace_invoice_list_with_table(content, invoices_detail)
+
+    return _apply_strategy_variant(content, strategy, variant)
+
+
+# ---------------------------------------------------------------------------
+# Generator — standalone (dane z dict/JSON)
+# ---------------------------------------------------------------------------
+
+def fill_template_from_dict(template_path: Path, output_path: Path,
+                            data: dict, strategy: str = "standard_collect"):
+    """
+    Wypełnia template danymi z dict (bez bazy).
+    Użyteczne do testowania i do integracji z innymi systemami.
+
+    Wymagane klucze w data:
+        creditor_name, cr_street, cr_city, cr_zip, cr_bank,
+        debtor_name, d_street, d_city, d_zip,
+        total_compensation_pln, assigned_to,
+        invoice_numbers (list[str]), invoice_tiers (set[str])
+
+    Raises:
+        ValueError: jeśli brakuje wymaganych kluczy lub strategia jest nieznana
+        FileNotFoundError: jeśli template nie istnieje
+    """
+    template_path = Path(template_path)
+    _validate_template_input(template_path, data)
+    variant = _get_strategy_variant(strategy)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = Path(tmpdir)
@@ -446,37 +494,7 @@ def fill_template_from_dict(template_path: Path, output_path: Path,
         with open(doc_xml_path, "rb") as f:
             content = f.read()
 
-        for placeholder, value in placeholders.items():
-            content = content.replace(
-                placeholder.encode("utf-8"),
-                _xml_escape(_sanitize_placeholder_value(value)).encode("utf-8"),
-            )
-
-        # Replace {{LISTA_FAKTUR}} paragraph with invoice table XML
-        if use_table:
-            table_xml = build_invoice_table_xml(invoices_detail)
-            content_str = content.decode("utf-8")
-
-            # Find the <w:p ...> containing {{LISTA_FAKTUR}} and replace entire paragraph
-            lista_pattern = r'<w:p[> ][^<]*(?:<(?!/w:p>)[^<]*)*\{\{LISTA_FAKTUR\}\}(?:[^<]|<(?!/w:p>))*</w:p>'
-            match = re.search(lista_pattern, content_str, re.DOTALL)
-            if match:
-                content_str = content_str[:match.start()] + table_xml + content_str[match.end():]
-            else:
-                # Fallback: simple text replacement
-                content_str = content_str.replace("{{LISTA_FAKTUR}}", "")
-
-            content = content_str.encode("utf-8")
-
-        if strategy != "standard_collect":
-            content = content.replace(
-                TEMPLATE_THREAT.encode("utf-8"),
-                _xml_escape(variant["threat_paragraph"]).encode("utf-8"),
-            )
-            content = content.replace(
-                TEMPLATE_CLOSING.encode("utf-8"),
-                _xml_escape(variant["closing_paragraph"]).encode("utf-8"),
-            )
+        content = _render_document_xml(content, data, strategy, variant)
 
         with open(doc_xml_path, "wb") as f:
             f.write(content)
