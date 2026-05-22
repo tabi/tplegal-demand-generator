@@ -4,6 +4,7 @@ __pycache__/
 .env
 *.docx
 !demand_generator/templates/*.docx
+demand_generator/templates/*-kopia*.docx
 dist/
 build/
 *.egg-info/
