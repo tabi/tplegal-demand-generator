@@ -36,7 +36,10 @@ class UnknownRatePeriodError(RuntimeError):
 # ═══════════════════════════════════════════════════════════════════════
 
 # Stawki odsetek ustawowych za opóźnienie w transakcjach handlowych
-# (stopa referencyjna NBP + 10 p.p. — art. 4 pkt 3 lit. b ustawy z 8.03.2013).
+# (stopa referencyjna NBP + 10 p.p. — art. 4 pkt 3 lit. b ustawy z 8.03.2013;
+# dłużnik prywatny, pozostałe przypadki poza zakresem narzędzia — dla dłużnika
+# publicznego podstawą jest art. 8 ust. 1, a dla publicznego podmiotu leczniczego
+# stawka to + 8 p.p. z art. 4 pkt 3 lit. a).
 #
 # Art. 11b: stawka jest ZAMROŻONA na całe półrocze — stosuje się stopę
 # referencyjną NBP z dnia 1 stycznia do odsetek należnych za okres 1.01-30.06

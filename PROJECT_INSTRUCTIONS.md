@@ -9,6 +9,10 @@ Po instalacji skopiuj go: `cp /mnt/user-data/uploads/wezwanie_template.docx /hom
 
 ### Workflow: generowanie wezwania
 
+**Zanim zaczniesz:** przeczytaj „OGRANICZENIE ZAKRESU — dłużnicy publiczni"
+w sekcji „Ważne". Jeśli dłużnik jest podmiotem publicznym, to narzędzie nie ma
+zastosowania i trzeba zatrzymać się przed krokiem 2.
+
 1. Użytkownik podaje dane sprawy (tekst, tabela lub CSV)
 2. Zbuduj JSON z danymi (schemat poniżej)
 3. Uruchom kalkulator: `calc-rekompensa --json /home/claude/invoices.json > /home/claude/calc_result.json`
@@ -60,11 +64,37 @@ Zapytaj użytkownika jeśli nie sprecyzował.
 - Kurs EUR/PLN z NBP — kalkulator pobiera automatycznie
 - Przedawnienie: 3 lata + koniec roku — kalkulator filtruje automatycznie
 - bank_account może być "___" jeśli wierzyciel go nie podał
-- Jeśli `calc-rekompensa` przerwie z błędem `UnknownRatePeriodError` — to nie
-  awaria, to zabezpieczenie. Tabela stawek nie pokrywa okresu, za który liczysz
-  odsetki. NIE obchodź tego: przejdź do sekcji „Aktualizacja stawek" poniżej.
-  Dawniej w tej sytuacji kalkulator po cichu brał ostatnią znaną stawkę i
-  wypuszczał wezwanie z błędną kwotą.
+
+**OGRANICZENIE ZAKRESU — dłużnicy publiczni.** Narzędzie obsługuje **wyłącznie
+dłużników prywatnych**: podstawa art. 7 ust. 1 u.p.n.o.t.h., stawka z art. 4
+pkt 3 lit. b (stopa referencyjna NBP + 10 p.p.). **Nie obsługuje** dłużników
+będących podmiotami publicznymi — dla nich podstawą roszczenia jest **art. 8
+ust. 1, a nie art. 7**, a gdy podmiot publiczny jest jednocześnie podmiotem
+leczniczym, stawka odsetek wynosi **+8 p.p.** (art. 4 pkt 3 lit. a), nie +10 p.p.
+
+Jeśli dłużnik wygląda na podmiot publiczny — SPZOZ, szpital, jednostka
+budżetowa, uczelnia, gmina, instytut — **ZATRZYMAJ SIĘ i zapytaj użytkownika.**
+Nie generuj wezwania automatycznie. Pismo wygenerowane tym narzędziem dla
+podmiotu publicznego miałoby błędną podstawę prawną, a dla publicznego podmiotu
+leczniczego dodatkowo zawyżoną stawkę odsetek.
+
+### Czego NIE robić
+
+**Jeśli `calc-rekompensa` zwróci `UnknownRatePeriodError`:**
+
+- **ZATRZYMAJ SIĘ. Nie generuj wezwania.**
+- **NIE obchodź błędu.** W szczególności: nie licz odsetek ręcznie, nie pisz
+  własnego kalkulatora, nie szukaj stawek w internecie, nie podstawiaj ostatniej
+  znanej stawki, nie zawężaj okresu naliczania, żeby zmieścić się w tabeli.
+- Napisz użytkownikowi dokładnie to: „Tabela stawek odsetek handlowych nie
+  pokrywa daty [X]. Wymagane dopisanie wiersza z obwieszczenia M.P. do
+  INTEREST_RATES przed wygenerowaniem wezwania."
+- Wyjątek jest **zamierzony**. Oznacza, że narzędzie nie zna prawidłowej stawki
+  ustawowej za ten okres. Wygenerowanie wezwania mimo to = pismo z błędną kwotą
+  wysłane do dłużnika. Dawniej kalkulator brał w tej sytuacji po cichu ostatnią
+  znaną stawkę — dlatego ten wyjątek istnieje.
+- Naprawa nie należy do Ciebie, tylko do właściciela repo: sekcja „Aktualizacja
+  stawek" poniżej opisuje, co trzeba zrobić.
 
 ### Aktualizacja stawek
 
@@ -102,7 +132,8 @@ Trzy reguły, których nie wolno złamać:
 - W komentarzu po wierszu wpisz sygnaturę obwieszczenia w formacie
   `M.P. rok poz. numer`. Wiersz bez sygnatury oznacz `TO_VERIFY`.
 - Stawkę **przepisz** z obwieszczenia. Nie licz jej samodzielnie jako
-  „stopa referencyjna NBP + 10 punktów" — pomyłka w stopie da błędne wezwania.
+  „stopa referencyjna NBP + 10 punktów" (dłużnik prywatny; pozostałe przypadki
+  poza zakresem narzędzia) — pomyłka w stopie da błędne wezwania.
 
 **Odsetki KC** (plik `demand_generator/civil_interest.py`, tabela
 `CIVIL_INTEREST_RATES`) działają inaczej: zmieniają się w dniu decyzji RPP, a nie
