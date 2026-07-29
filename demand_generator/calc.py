@@ -20,6 +20,17 @@ from typing import Optional
 import holidays
 import requests
 
+
+class UnknownRatePeriodError(RuntimeError):
+    """Brak stawki odsetek handlowych dla żądanej daty w INTEREST_RATES.
+
+    Podnoszony, gdy naliczanie wychodzi POZA ostatni znany okres tabeli — czyli
+    gdy weszło w życie nowe obwieszczenie, a tabela nie została zaktualizowana.
+    Wcześniej w tej sytuacji działał cichy fallback na ostatnią znaną stawkę,
+    co dawało wezwania z błędną kwotą odsetek i bez żadnego sygnału o błędzie.
+    """
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # STAŁE
 # ═══════════════════════════════════════════════════════════════════════
@@ -110,12 +121,36 @@ def last_business_day_of_month(year: int, month: int) -> date:
 # ODSETKI (art. 7 ust. 1)
 # ═══════════════════════════════════════════════════════════════════════
 
+def _unknown_rate_period_error(d: date) -> UnknownRatePeriodError:
+    """Buduje wyjątek z gotową instrukcją naprawy dla operatora."""
+    last = INTEREST_RATES[-1]
+    return UnknownRatePeriodError(
+        f"Brak stawki odsetek handlowych dla dnia {d.isoformat()}. "
+        f"Ostatni znany okres kończy się {last['to_d'].isoformat()} "
+        f"(stawka {last['rate']:.2f}%). "
+        "Co zrobić: pobierz z Monitora Polskiego obwieszczenie ministra właściwego "
+        "do spraw gospodarki (art. 11c ustawy z 8.03.2013) obejmujące tę datę "
+        "i dopisz wiersz do INTEREST_RATES w demand_generator/calc.py. "
+        "Instrukcja krok po kroku: PROJECT_INSTRUCTIONS.md, sekcja "
+        "'Aktualizacja stawek'."
+    )
+
+
 def get_interest_rate(d: date) -> float:
-    """Stawka odsetek handlowych obowiązująca w danym dniu."""
+    """Stawka odsetek handlowych obowiązująca w danym dniu.
+
+    Art. 11b: stawka jest zamrożona na całe półrocze, więc tabela ma domknięte
+    okresy. Data po ostatnim okresie oznacza nieaktualną tabelę, nie "brak
+    zmiany" — dlatego jest to błąd, a nie fallback.
+    """
     for r in INTEREST_RATES:
         if r["from_d"] <= d <= r["to_d"]:
             return r["rate"]
-    # Fallback: ostatnia znana stawka
+    if d > INTEREST_RATES[-1]["to_d"]:
+        raise _unknown_rate_period_error(d)
+    # Data przed początkiem tabeli. Zachowane dotychczasowe zachowanie — takie
+    # roszczenia są i tak przedawnione (art. 118 KC), a zmiana tej gałęzi jest
+    # poza zakresem tej poprawki.
     return INTEREST_RATES[-1]["rate"]
 
 
@@ -125,10 +160,17 @@ def _interest_start_date(due_date: date, interest_start_override: Optional[date]
 
 
 def _interest_rate_period_end(current: date, payment_date: date) -> date:
-    """Koniec podokresu dla stawki obowiązującej w dniu current."""
+    """Koniec podokresu dla stawki obowiązującej w dniu current.
+
+    Bliźniak fallbacku z get_interest_rate: wcześniej zwracał payment_date, przez
+    co cały ogon okresu po nieznanej granicy leciał jednym podokresem po ostatniej
+    znanej stawce.
+    """
     for r in INTEREST_RATES:
         if r["from_d"] <= current <= r["to_d"]:
             return min(payment_date, r["to_d"])
+    if current > INTEREST_RATES[-1]["to_d"]:
+        raise _unknown_rate_period_error(current)
     return payment_date
 
 

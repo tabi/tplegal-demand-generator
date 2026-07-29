@@ -5,7 +5,8 @@ Modul reusable — niezalezny od calc.py i generator.py.
 Podstawa: wyrok SO Bialystok VII Ga 377/25 z 28.11.2025 (sedzia Pawel Hempel).
 """
 
-from datetime import date
+import warnings
+from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
 # Stawki odsetek ustawowych za opoznienie z art. 481 par. 2 KC
@@ -31,6 +32,20 @@ CIVIL_INTEREST_RATES = [
                                             # w M.P. -- uzupelnic numer po publikacji.
 ]
 
+# Data ostatniej weryfikacji tej tabeli u zrodla (M.P. przez ISAP / LEX).
+#
+# Tabela jest ZDARZENIOWA, nie okresowa: brak nowego wpisu znaczy "stopa
+# referencyjna NBP sie nie zmienila", wiec niesienie ostatniej stawki w
+# przyszlosc jest POPRAWNE. To inaczej niz INTEREST_RATES w calc.py, gdzie
+# okresy sa domkniete przez art. 11b i luka = blad.
+#
+# Haczyk: poprawne niesienie jest nieodroznialne od tabeli przeterminowanej.
+# Dlatego naliczanie za dzien pozniejszy niz LAST_VERIFIED_DATE +
+# STALENESS_WARNING_DAYS ostrzega przez warnings.warn (stderr), zamiast
+# rzucac wyjatkiem.
+LAST_VERIFIED_DATE = date(2026, 7, 29)
+STALENESS_WARNING_DAYS = 180
+
 
 def _get_rate_for_date(d: date) -> Decimal:
     """Zwraca stawke odsetek KC obowiazujaca w danym dniu."""
@@ -44,6 +59,17 @@ def _get_rate_for_date(d: date) -> Decimal:
         raise ValueError(
             f"compensation_interest_start_date ({d}) przed zakresem tabeli stawek; "
             f"rozszerz CIVIL_INTEREST_RATES o wczesniejsze stawki"
+        )
+    if d > LAST_VERIFIED_DATE + timedelta(days=STALENESS_WARNING_DAYS):
+        warnings.warn(
+            f"Tabela stawek KC (CIVIL_INTEREST_RATES) byla weryfikowana u zrodla "
+            f"{LAST_VERIFIED_DATE.isoformat()}, a naliczasz odsetki za dzien "
+            f"{d.isoformat()} — ponad {STALENESS_WARNING_DAYS} dni pozniej. "
+            f"Uzyta stawka {rate}% moze byc nieaktualna. Sprawdz w Monitorze "
+            f"Polskim obwieszczenia Ministra Sprawiedliwosci (art. 481 par. 2^4 KC), "
+            f"czy stopa referencyjna NBP sie nie zmienila, i zaktualizuj "
+            f"CIVIL_INTEREST_RATES oraz LAST_VERIFIED_DATE.",
+            stacklevel=2,
         )
     return rate
 
