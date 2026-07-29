@@ -13,6 +13,12 @@ dependencies = [
     "zeep",
 ]
 
+[project.optional-dependencies]
+# Deklaracja istniejącej zależności testowej dla CI — nie nowa dep runtime.
+test = [
+    "pytest>=7",
+]
+
 [project.scripts]
 generate-demand = "demand_generator.generator:main"
 calc-rekompensa = "demand_generator.calc_cli:main"

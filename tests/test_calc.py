@@ -17,6 +17,8 @@ from unittest.mock import patch
 import pytest
 
 from demand_generator.calc import (
+    INTEREST_RATES,
+    UnknownRatePeriodError,
     next_business_day,
     last_business_day_of_month,
     get_interest_rate,
@@ -100,11 +102,35 @@ class TestGetInterestRate:
     def test_known_rate_2026(self):
         assert get_interest_rate(date(2026, 3, 1)) == 14.00
 
-    def test_fallback_future_date(self):
-        """Data poza zakresem -> zwraca ostatnią znaną stawkę."""
-        rate = get_interest_rate(date(2030, 1, 1))
-        assert isinstance(rate, (int, float))
-        assert rate > 0
+    def test_known_rate_h2_2026(self):
+        """M.P. 2026 poz. 642 — 13,75% dla całego II półrocza 2026."""
+        assert get_interest_rate(date(2026, 7, 1)) == 13.75
+        assert get_interest_rate(date(2026, 12, 31)) == 13.75
+
+    def test_rate_frozen_across_h1_2026(self):
+        """Art. 11b: obniżka stopy NBP 5.03.2026 NIE zmienia stawki w półroczu."""
+        assert get_interest_rate(date(2026, 3, 4)) == 14.00
+        assert get_interest_rate(date(2026, 3, 5)) == 14.00
+        assert get_interest_rate(date(2026, 6, 30)) == 14.00
+
+    def test_date_after_table_raises(self):
+        """Data po ostatnim okresie tabeli -> głośny błąd, nie cicha stawka.
+
+        Poprzednia wersja tego testu asertowała tylko `rate > 0` i tym samym
+        utrwalała cichy fallback, przez który brak wiersza na II półrocze 2026
+        przeszedł niezauważony.
+        """
+        with pytest.raises(UnknownRatePeriodError) as exc:
+            get_interest_rate(date(2030, 1, 1))
+        msg = str(exc.value)
+        assert "2030-01-01" in msg
+        assert INTEREST_RATES[-1]["to"] in msg
+        assert "INTEREST_RATES" in msg
+
+    def test_last_known_day_still_resolves(self):
+        """Ostatni dzień ostatniego okresu nadal się rozwiązuje (brak off-by-one)."""
+        last = INTEREST_RATES[-1]
+        assert get_interest_rate(last["to_d"]) == last["rate"]
 
 
 class TestCalculateInterest:
@@ -140,12 +166,48 @@ class TestCalculateInterest:
         assert Decimal("600") < result < Decimal("700")
 
     def test_cross_rate_boundary(self):
-        """Odsetki przechodzące przez zmianę stawki."""
-        # 2025-06-30 -> 2025-07-01: 15.75 -> 15.25
-        result = calculate_interest(
-            Decimal("100000"), date(2025, 6, 15), date(2025, 7, 15)
+        """Odsetki przez granicę półrocza — asercja WARTOŚCI, nie samo "> 0".
+
+        Test kontrolny: 100 000 zł, due_date 2026-01-10, payment_date 2026-07-20.
+        Art. 11b dzieli okres na 30.06/01.07, więc muszą wyjść DWA podokresy:
+            171 dni x 14,00% (M.P. 2025 poz. 1257) = 6 558,90
+             20 dni x 13,75% (M.P. 2026 poz. 642)  =   753,42
+        Przed naprawą tabeli drugi podokres leciał po 14,00% (767,12 zł), co
+        dawało 7 326,02 zamiast 7 312,32 — i żaden test tego nie łapał.
+        """
+        detailed = calculate_interest_detailed(
+            Decimal("100000"), date(2026, 1, 10), date(2026, 7, 20)
         )
-        assert result > Decimal("0")
+        assert [
+            (p["from"], p["to"], p["days"], p["rate"]) for p in detailed["periods"]
+        ] == [
+            (date(2026, 1, 11), date(2026, 6, 30), 171, 14.00),
+            (date(2026, 7, 1), date(2026, 7, 20), 20, 13.75),
+        ]
+        assert [p["amount"] for p in detailed["periods"]] == [
+            Decimal("6558.90"),
+            Decimal("753.42"),
+        ]
+        # Kanon produkcyjny: calculate_batch -> calculate_interest_detailed,
+        # czyli suma zaokrąglonych podokresów. Tabela w wezwaniu musi się spinać.
+        assert detailed["total"] == Decimal("7312.32")
+        assert sum(p["amount"] for p in detailed["periods"]) == detailed["total"]
+
+    def test_rounding_divergence_between_both_functions(self):
+        """UWAGA — rozjazd WEWNĄTRZ modułu, świadomie zapięty testem.
+
+        calculate_interest() sumuje kwoty surowe i zaokrągla RAZ na końcu, a
+        calculate_interest_detailed() sumuje kwoty już zaokrąglone per podokres.
+        Na tym samym wejściu daje to różnicę jednego grosza. Ścieżka produkcyjna
+        (calc-rekompensa -> calculate_batch -> ..._detailed) używa wariantu
+        sumującego zaokrąglone, więc to ON jest kanonem.
+
+        Ten test istnieje, żeby rozjazd był WIDOCZNY, a nie żeby go błogosławić —
+        do ujednolicenia razem z rekompensa-tools.
+        """
+        args = (Decimal("100000"), date(2026, 1, 10), date(2026, 7, 20))
+        assert calculate_interest(*args) == Decimal("7312.33")
+        assert calculate_interest_detailed(*args)["total"] == Decimal("7312.32")
 
     def test_interest_start_override(self):
         """Override startu odsetek (kroczące przedawnienie)."""
@@ -603,7 +665,8 @@ class TestCivilInterestForInvoice:
 
 
 class TestCalculateInvoiceCivilInterest:
-    def test_invoice_result_has_civil_interest_key(self):
+    @patch("demand_generator.calc.get_nbp_eur_rate", return_value=Decimal("4.30"))
+    def test_invoice_result_has_civil_interest_key(self, mock_rate):
         calc = calculate_invoice(
             gross=Decimal("10000"),
             due_date=date(2023, 6, 1),
@@ -614,7 +677,8 @@ class TestCalculateInvoiceCivilInterest:
         assert isinstance(calc["civil_interest"], Decimal)
         assert calc["civil_interest"] > Decimal("0")
 
-    def test_total_pln_excludes_civil_interest(self):
+    @patch("demand_generator.calc.get_nbp_eur_rate", return_value=Decimal("4.30"))
+    def test_total_pln_excludes_civil_interest(self, mock_rate):
         # Kontrakt: total_pln = comp + interest handlowe (BEZ civil_interest).
         # Civil_interest jest osobnym polem — caller sumuje ręcznie.
         calc = calculate_invoice(
@@ -626,7 +690,8 @@ class TestCalculateInvoiceCivilInterest:
         assert calc["total_pln"] == calc["compensation"]["comp_pln"] + calc["interest"]
         assert calc["civil_interest"] > Decimal("0")
 
-    def test_prescribed_invoice_zero_civil_interest(self):
+    @patch("demand_generator.calc.get_nbp_eur_rate", return_value=Decimal("4.30"))
+    def test_prescribed_invoice_zero_civil_interest(self, mock_rate):
         # Faktura sprzed 10 lat + lawsuit_date dziś -> w pełni przedawnione
         calc = calculate_invoice(
             gross=Decimal("10000"),
@@ -639,7 +704,8 @@ class TestCalculateInvoiceCivilInterest:
 
 
 class TestCalculateBatchCivilInterest:
-    def test_batch_has_total_civil_interest_pln(self):
+    @patch("demand_generator.calc.get_nbp_eur_rate", return_value=Decimal("4.30"))
+    def test_batch_has_total_civil_interest_pln(self, mock_rate):
         invoices = [
             {"gross": 10000, "due_date": date(2023, 6, 1), "payment_date": date(2023, 8, 1)},
             {"gross": 60000, "due_date": date(2024, 1, 15), "payment_date": date(2024, 3, 1)},
@@ -648,7 +714,8 @@ class TestCalculateBatchCivilInterest:
         assert "total_civil_interest_pln" in result
         assert result["total_civil_interest_pln"] > Decimal("0")
 
-    def test_total_claim_excludes_civil_interest(self):
+    @patch("demand_generator.calc.get_nbp_eur_rate", return_value=Decimal("4.30"))
+    def test_total_claim_excludes_civil_interest(self, mock_rate):
         # Kontrakt: total_claim_pln = comp + interest handlowe (BEZ civil).
         # total_civil_interest_pln jest osobnym polem — generator sumuje w combined.
         invoices = [
