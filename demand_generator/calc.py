@@ -25,18 +25,35 @@ import requests
 # ═══════════════════════════════════════════════════════════════════════
 
 # Stawki odsetek ustawowych za opóźnienie w transakcjach handlowych
-# (stopa referencyjna NBP + 10 p.p., art. 7 ust. 1)
-# UWAGA: wymaga manualnej aktualizacji przy każdej zmianie stóp RPP.
+# (stopa referencyjna NBP + 10 p.p. — art. 4 pkt 3 lit. b ustawy z 8.03.2013).
+#
+# Art. 11b: stawka jest ZAMROŻONA na całe półrocze — stosuje się stopę
+# referencyjną NBP z dnia 1 stycznia do odsetek należnych za okres 1.01-30.06
+# i z dnia 1 lipca do odsetek za okres 1.07-31.12. Zmiana stopy NBP w trakcie
+# półrocza NIE zmienia stawki. Dlatego wiersze MUSZĄ pokrywać się z półroczami:
+# "from" wyłącznie 01-01 albo 07-01, "to" wyłącznie 06-30 albo 12-31.
+#
+# UWAGA: wymaga manualnej aktualizacji dwa razy w roku (2 stycznia i 2 lipca).
+# Instrukcja krok po kroku: PROJECT_INSTRUCTIONS.md, sekcja "Aktualizacja stawek".
 INTEREST_RATES = [
-    {"from": "2022-01-01", "to": "2022-06-30", "rate": 11.75},  # ref 1.75
-    {"from": "2022-07-01", "to": "2022-12-31", "rate": 16.00},  # ref 6.00
-    {"from": "2023-01-01", "to": "2023-06-30", "rate": 16.75},  # ref 6.75
-    {"from": "2023-07-01", "to": "2023-12-31", "rate": 16.75},  # ref 6.75
-    {"from": "2024-01-01", "to": "2024-06-30", "rate": 15.75},  # ref 5.75
-    {"from": "2024-07-01", "to": "2024-12-31", "rate": 15.75},  # ref 5.75
-    {"from": "2025-01-01", "to": "2025-06-30", "rate": 15.75},  # ref 5.75
-    {"from": "2025-07-01", "to": "2025-12-31", "rate": 15.25},  # ref 5.25 (obniżka maj 2025)
-    {"from": "2026-01-01", "to": "2026-06-30", "rate": 14.00},  # ref 4.00 (M.P. 2025 poz. 1257)
+    # Oba wiersze 2022 są TO_VERIFY — nie mają cytowanego obwieszczenia. Roszczenia
+    # z 2022 r. są już przedawnione (art. 118 KC), więc nie blokują naliczania.
+    {"from": "2022-01-01", "to": "2022-06-30", "rate": 11.75},  # ref 1.75, TO_VERIFY
+    {"from": "2022-07-01", "to": "2022-12-31", "rate": 16.00},  # ref 6.00, TO_VERIFY
+    {"from": "2023-01-01", "to": "2023-06-30", "rate": 16.75},  # ref 6.75, M.P. 2022 poz. 1263
+    {"from": "2023-07-01", "to": "2023-12-31", "rate": 16.75},  # ref 6.75, M.P. 2023 poz. 626
+    {"from": "2024-01-01", "to": "2024-06-30", "rate": 15.75},  # ref 5.75, M.P. 2023 poz. 1465
+    {"from": "2024-07-01", "to": "2024-12-31", "rate": 15.75},  # ref 5.75, M.P. 2024 poz. 546
+    {"from": "2025-01-01", "to": "2025-06-30", "rate": 15.75},  # ref 5.75, M.P. 2024 poz. 1106
+    {"from": "2025-07-01", "to": "2025-12-31", "rate": 15.25},  # ref 5.25, M.P. 2025 poz. 602
+    {"from": "2026-01-01", "to": "2026-06-30", "rate": 14.00},  # ref 4.00, M.P. 2025 poz. 1257
+    # Stawka wpisana wprost z obwieszczenia (nie wyliczona z 3,75 + 10 p.p.):
+    # M.P. 2026 poz. 642 — obwieszczenie Ministra Finansów i Gospodarki
+    # z 22.06.2026 (ogłoszone 26.06.2026) podaje dla okresu 1.07-31.12.2026
+    # 13,75% dla dłużnika, który NIE jest podmiotem publicznym będącym podmiotem
+    # leczniczym, oraz 11,75% dla takiego podmiotu (art. 4 pkt 3 lit. a — wariant
+    # +8 p.p. nie jest tu zaimplementowany).
+    {"from": "2026-07-01", "to": "2026-12-31", "rate": 13.75},  # M.P. 2026 poz. 642, ref 3.75
 ]
 
 # Preparse dates
