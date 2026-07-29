@@ -28,6 +28,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from demand_generator.calc import calculate_batch
+from demand_generator.check_rates import warn_if_stale
 
 
 class _DecimalEncoder(json.JSONEncoder):
@@ -60,6 +61,12 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # Kontrola aktualności tabel stawek — na stderr, żeby nie zaśmiecić JSON-a
+    # na stdout. Świadomie przy KAŻDYM uruchomieniu: osobnej komendy check-rates
+    # nikt nie odpali z własnej woli, a to jest ostatni moment, w którym da się
+    # zauważyć, że wezwanie zaraz policzy się po nieaktualnej stawce.
+    warn_if_stale()
 
     # Wczytaj JSON
     json_path = Path(args.json)

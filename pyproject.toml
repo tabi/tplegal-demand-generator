@@ -22,6 +22,7 @@ test = [
 [project.scripts]
 generate-demand = "demand_generator.generator:main"
 calc-rekompensa = "demand_generator.calc_cli:main"
+check-rates = "demand_generator.check_rates:main"
 
 [tool.setuptools.packages.find]
 include = ["demand_generator*"]
