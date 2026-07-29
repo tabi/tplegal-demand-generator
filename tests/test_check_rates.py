@@ -9,12 +9,16 @@ którą check-rates ma wykrywać).
 import io
 from datetime import date, timedelta
 
+import pytest
+
+from demand_generator import __version__
 from demand_generator.calc import INTEREST_RATES
 from demand_generator.check_rates import (
     EXIT_EXPIRED,
     EXIT_OK,
     EXIT_WARN,
     HORIZON_DAYS,
+    main,
     status,
     warn_if_stale,
 )
@@ -68,6 +72,30 @@ class TestStatus:
         commercial = next(e for e in st["tabele"] if "INTEREST_RATES" in e["tabela"])
         assert commercial["dni_do_konca"] == 0
         assert commercial["stan"] == "UWAGA"
+
+
+class TestVersionFlag:
+    """Wersja ma być czytana z metadanych pakietu, nie duplikowana w kodzie.
+
+    Świadomie NIE asertuję konkretnego numeru: metadane pochodzą z instalacji,
+    więc po bumpie w pyproject.toml, a przed reinstalacją, taki test padałby
+    z powodu niezwiązanego z kodem.
+    """
+
+    def test_version_is_resolvable(self):
+        assert isinstance(__version__, str)
+        assert __version__
+        assert "brak-instalacji" not in __version__, (
+            "pakiet nie jest zainstalowany — odpal pip install -e '.[test]'"
+        )
+        assert __version__[0].isdigit()
+
+    def test_version_flag_exits_zero(self, capsys, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["check-rates", "--version"])
+        with pytest.raises(SystemExit) as exc:
+            main()
+        assert exc.value.code == 0
+        assert __version__ in capsys.readouterr().out
 
 
 class TestWarnIfStale:

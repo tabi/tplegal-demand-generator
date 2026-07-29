@@ -27,6 +27,7 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
+from demand_generator import __version__
 from demand_generator.calc import calculate_batch
 from demand_generator.check_rates import warn_if_stale
 
@@ -46,6 +47,11 @@ class _DecimalEncoder(json.JSONEncoder):
 def main():
     parser = argparse.ArgumentParser(
         description="Kalkulator rekompensat i odsetek handlowych — Rekompensa.pl"
+    )
+    parser.add_argument(
+        "--version", "-V",
+        action="version",
+        version=f"%(prog)s (tplegal-demand-generator {__version__})",
     )
     parser.add_argument(
         "--json", "-j",

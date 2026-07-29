@@ -21,10 +21,12 @@ Sprawdzane są DWIE tabele o różnej semantyce — i to jest tu najważniejsze:
     "nikt tego nie sprawdził".
 """
 
+import argparse
 import sys
 from datetime import date, timedelta
 from typing import Optional
 
+from demand_generator import __version__
 from demand_generator.calc import INTEREST_RATES
 from demand_generator.civil_interest import (
     CIVIL_INTEREST_RATES,
@@ -121,6 +123,16 @@ def warn_if_stale(today: Optional[date] = None, stream=None) -> int:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Kontrola aktualności tabel stawek odsetek — Rekompensa.pl",
+    )
+    parser.add_argument(
+        "--version", "-V",
+        action="version",
+        version=f"%(prog)s (tplegal-demand-generator {__version__})",
+    )
+    parser.parse_args()
+
     st = status()
     print(f"check-rates — stan na {st['today'].isoformat()}")
     for entry in st["tabele"]:
