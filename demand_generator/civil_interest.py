@@ -26,10 +26,13 @@ CIVIL_INTEREST_RATES = [
     (date(2025, 10, 9), Decimal('10.00')),  # M.P. 2025 poz. 1136 (obwieszczenie z 30.10.2025)
     (date(2025, 11, 6), Decimal('9.75')),   # M.P. 2025 poz. 1192 (obwieszczenie z 18.11.2025)
     (date(2025, 12, 4), Decimal('9.50')),   # M.P. 2025 poz. 1308 (obwieszczenie z 23.12.2025)
-    (date(2026, 3, 5),  Decimal('9.25')),   # Stopa ref. NBP 3,75% + 5,5 pp = 9,25%. Obowiazuje
-                                            # ex lege z dniem zmiany stopy NBP (art. 481 par. 2 KC).
-                                            # Obwieszczenie MS na dzien 08.04.2026 nie zlokalizowane
-                                            # w M.P. -- uzupelnic numer po publikacji.
+    (date(2026, 3, 5),  Decimal('9.25')),   # M.P. 2026 poz. 367 (obwieszczenie Ministra
+                                            # Sprawiedliwosci z 08.04.2026, ogl. 10.04.2026).
+                                            # Stopa ref. NBP 3,75% + 5,5 pp.
+                                            # Data wejscia to 05.03.2026, a NIE data
+                                            # obwieszczenia: stawka obowiazuje ex lege od dnia
+                                            # zmiany stopy NBP (art. 481 par. 2 KC), a
+                                            # obwieszczenie jest tylko deklaratoryjne.
 ]
 
 # Data ostatniej weryfikacji tej tabeli u zrodla (M.P. przez ISAP / LEX).

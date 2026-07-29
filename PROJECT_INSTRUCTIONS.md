@@ -60,3 +60,61 @@ Zapytaj użytkownika jeśli nie sprecyzował.
 - Kurs EUR/PLN z NBP — kalkulator pobiera automatycznie
 - Przedawnienie: 3 lata + koniec roku — kalkulator filtruje automatycznie
 - bank_account może być "___" jeśli wierzyciel go nie podał
+- Jeśli `calc-rekompensa` przerwie z błędem `UnknownRatePeriodError` — to nie
+  awaria, to zabezpieczenie. Tabela stawek nie pokrywa okresu, za który liczysz
+  odsetki. NIE obchodź tego: przejdź do sekcji „Aktualizacja stawek" poniżej.
+  Dawniej w tej sytuacji kalkulator po cichu brał ostatnią znaną stawkę i
+  wypuszczał wezwanie z błędną kwotą.
+
+### Aktualizacja stawek
+
+Stawki odsetek nie aktualizują się same — dwa razy w roku trzeba dopisać jeden
+wiersz do tabeli. Instrukcja jest napisana tak, żeby dało się ją wykonać bez
+znajomości Pythona.
+
+**Kiedy:** 2 stycznia i 2 lipca. Obwieszczenie ukazuje się zwykle w drugiej
+połowie grudnia i drugiej połowie czerwca, więc na początku miesiąca jest już
+opublikowane.
+
+**Skąd wziąć stawkę:**
+
+1. Wejdź na https://isap.sejm.gov.pl i szukaj frazy
+   `odsetek ustawowych za opóźnienie w transakcjach handlowych`, rocznik bieżący.
+2. Otwórz najnowsze **obwieszczenie ministra właściwego do spraw gospodarki**
+   (do 2025 r. był to Minister Rozwoju i Technologii, od obwieszczenia na
+   I półrocze 2026 — Minister Finansów i Gospodarki).
+3. Obwieszczenie podaje **dwie** stawki. Bierzesz tę z punktu mówiącego
+   „w przypadku transakcji handlowych, w których dłużnikiem **nie** jest podmiot
+   publiczny będący podmiotem leczniczym" — czyli wyższą. Niższa dotyczy
+   publicznych szpitali i ten kalkulator jej nie obsługuje.
+
+**Co zmienić:** plik `demand_generator/calc.py`, tabela `INTEREST_RATES`. Dopisz
+na SAMYM KOŃCU listy jeden wiersz, kopiując format poprzedniego:
+
+    {"from": "2027-01-01", "to": "2027-06-30", "rate": 12.34},  # M.P. 2026 poz. 1234
+
+Trzy reguły, których nie wolno złamać:
+
+- `from` może być **tylko** `-01-01` albo `-07-01`, a `to` **tylko** `-06-30`
+  albo `-12-31`. Stawka jest zamrożona na całe półrocze (art. 11b ustawy
+  z 8.03.2013), więc obniżka stóp NBP w środku półrocza nic nie zmienia i
+  **nie wolno** dodawać wiersza z datą w środku półrocza.
+- W komentarzu po wierszu wpisz sygnaturę obwieszczenia w formacie
+  `M.P. rok poz. numer`. Wiersz bez sygnatury oznacz `TO_VERIFY`.
+- Stawkę **przepisz** z obwieszczenia. Nie licz jej samodzielnie jako
+  „stopa referencyjna NBP + 10 punktów" — pomyłka w stopie da błędne wezwania.
+
+**Odsetki KC** (plik `demand_generator/civil_interest.py`, tabela
+`CIVIL_INTEREST_RATES`) działają inaczej: zmieniają się w dniu decyzji RPP, a nie
+co pół roku. Tam dopisujesz wiersz tylko wtedy, gdy RPP zmieniła stopy — i za
+każdym razem, gdy to sprawdzasz, podnieś `LAST_VERIFIED_DATE` na dzień
+sprawdzenia, **nawet jeśli nic się nie zmieniło**. Ta data jest jedynym
+sygnałem, że ktoś w ogóle patrzył.
+
+**Jak sprawdzić, czy jest robota:**
+
+    check-rates
+
+Komenda wypisuje, ile dni zostało do końca każdej z tabel. Kod wyjścia `0`
+oznacza spokój, `1` — mniej niż 30 dni, `2` — termin już minął. Sam kalkulator
+też ostrzega (na stderr) przy każdym uruchomieniu, gdy zostało mniej niż 30 dni.
