@@ -18,7 +18,9 @@ import pytest
 
 from demand_generator.calc import (
     INTEREST_RATES,
+    DebtorType,
     UnknownRatePeriodError,
+    compute_effective_due_date,
     next_business_day,
     last_business_day_of_month,
     get_interest_rate,
@@ -133,6 +135,116 @@ class TestGetInterestRate:
         assert get_interest_rate(last["to_d"]) == last["rate"]
 
 
+class TestArt115WKalkulatorze:
+    """Art. 115 KC nakładany WEWNĄTRZ kalkulatora (decyzja 30.07.2026).
+
+    Zmiana lustrzana do toru A (rekompensa/calculator/calc.py w tplegal-tools).
+    Oba tory muszą liczyć tak samo, bo wezwanie ad hoc z Claude Desktop i wezwanie
+    z pipeline'u bazodanowego trafiają do tej samej sprawy.
+    """
+
+    def test_next_business_day_jest_idempotentny(self):
+        """Fundament naprawy: podwójna korekta nie zmienia wyniku."""
+        for d in (date(2026, 1, 10), date(2026, 1, 11), date(2026, 1, 12), date(2026, 1, 6)):
+            once = compute_effective_due_date(d)
+            assert compute_effective_due_date(once) == once
+            assert once.weekday() < 5
+
+    def test_odsetki_od_soboty_rowne_odsetkom_od_poniedzialku(self):
+        sobota, poniedzialek, paid = date(2026, 1, 10), date(2026, 1, 12), date(2026, 7, 20)
+        assert calculate_interest(Decimal("100000"), sobota, paid) == calculate_interest(
+            Decimal("100000"), poniedzialek, paid
+        )
+
+    def test_odsetki_startuja_dzien_po_terminie_efektywnym(self):
+        detailed = calculate_interest_detailed(
+            Decimal("100000"), date(2026, 1, 10), date(2026, 7, 20)
+        )
+        assert detailed["start_date"] == date(2026, 1, 13)
+
+    def test_zaplata_w_pierwszy_dzien_roboczy_daje_zero(self):
+        assert calculate_interest(
+            Decimal("100000"), date(2026, 1, 10), date(2026, 1, 12)
+        ) == Decimal("0")
+
+    @patch("demand_generator.calc.get_nbp_eur_rate", return_value=Decimal("4.2267"))
+    def test_delay_days_od_terminu_efektywnego(self, _mock_rate):
+        inv = calculate_invoice(
+            Decimal("100000"), date(2026, 1, 10), date(2026, 7, 20),
+            cutoff_date=date(2026, 7, 20),
+        )
+        assert inv["delay_days"] == 189
+
+    def test_kurs_nbp_z_miesiaca_po_korekcie(self):
+        """31.01.2026 to sobota → wymagalność 02.02 → kurs z 30.01.2026."""
+        assert get_compensation_eur_rate_date(date(2026, 1, 31)) == date(2026, 1, 30)
+
+    def test_odsetki_kc_od_terminu_efektywnego(self):
+        od_soboty = calculate_civil_interest_for_invoice(
+            Decimal("1000"), date(2026, 1, 10), date(2026, 7, 20)
+        )
+        od_poniedzialku = calculate_civil_interest_for_invoice(
+            Decimal("1000"), date(2026, 1, 12), date(2026, 7, 20)
+        )
+        assert od_soboty == od_poniedzialku
+
+
+class TestDebtorType:
+    """Dłużnik publiczny: art. 8 ust. 1 + stawka +8 p.p. dla podmiotu leczniczego."""
+
+    def test_rate_medical_o_dwa_punkty_nizsza(self):
+        """Inwariant tabeli: +8 p.p. to zawsze +10 p.p. minus 2 p.p."""
+        for r in INTEREST_RATES:
+            assert round(r["rate"] - r["rate_medical"], 2) == 2.00, r["from"]
+
+    def test_h2_2026_wprost_z_obwieszczenia(self):
+        """M.P. 2026 poz. 642 podaje 13,75% i 11,75%."""
+        assert get_interest_rate(date(2026, 7, 1), DebtorType.PRIVATE) == 13.75
+        assert get_interest_rate(date(2026, 7, 1), DebtorType.PUBLIC_MEDICAL) == 11.75
+
+    def test_publiczny_niemedyczny_ma_stawke_standardowa(self):
+        """Art. 4 pkt 3 lit. b — gmina: +10 p.p., jak prywatny."""
+        assert get_interest_rate(
+            date(2026, 7, 1), DebtorType.PUBLIC_NON_MEDICAL
+        ) == get_interest_rate(date(2026, 7, 1), DebtorType.PRIVATE)
+
+    def test_domyslnie_prywatny(self):
+        assert get_interest_rate(date(2026, 7, 1)) == 13.75
+
+    @pytest.mark.parametrize(
+        "debtor_type",
+        [DebtorType.PUBLIC_NON_MEDICAL, DebtorType.PUBLIC_MEDICAL],
+    )
+    def test_dluznik_publiczny_rzuca_not_implemented(self, debtor_type):
+        """Reżim art. 8 niekompletny — brak limitu terminu z art. 8 ust. 2/4a."""
+        for fn in (calculate_interest, calculate_interest_detailed, calculate_invoice):
+            with pytest.raises(NotImplementedError) as exc:
+                fn(
+                    Decimal("1000"), date(2026, 1, 9), date(2026, 3, 1),
+                    debtor_type=debtor_type,
+                )
+            msg = str(exc.value)
+            assert "art. 8 ust. 2/4a" in msg
+            assert "doręczenia" in msg
+
+    def test_batch_publiczny_rzuca_not_implemented(self):
+        with pytest.raises(NotImplementedError):
+            calculate_batch(
+                [{
+                    "gross": Decimal("1000"),
+                    "due_date": date(2026, 1, 9),
+                    "payment_date": date(2026, 3, 1),
+                }],
+                debtor_type=DebtorType.PUBLIC_MEDICAL,
+            )
+
+    def test_prywatny_liczy_normalnie(self):
+        assert calculate_interest(
+            Decimal("100000"), date(2026, 1, 9), date(2026, 7, 20),
+            debtor_type=DebtorType.PRIVATE,
+        ) > Decimal("0")
+
+
 class TestCalculateInterest:
     def test_no_delay(self):
         """Zapłata w terminie -> odsetki 0."""
@@ -149,9 +261,14 @@ class TestCalculateInterest:
         assert result == Decimal("0")
 
     def test_one_day_late(self):
-        """1 dzień opóźnienia -> minimalne odsetki."""
+        """1 dzień opóźnienia -> minimalne odsetki.
+
+        Termin 03.06.2024 (poniedziałek) — poprzednio fixture miał 01.06.2024,
+        czyli SOBOTĘ, więc po wejściu art. 115 KC do kalkulatora zapłata 02.06
+        przestała być opóźnieniem. Fixture był niepoprawny, semantyka nie.
+        """
         result = calculate_interest(
-            Decimal("10000"), date(2024, 6, 1), date(2024, 6, 2)
+            Decimal("10000"), date(2024, 6, 3), date(2024, 6, 4)
         )
         assert result > Decimal("0")
         # 10000 * 15.75% / 365 * 1 ≈ 4.32
@@ -168,29 +285,34 @@ class TestCalculateInterest:
     def test_cross_rate_boundary(self):
         """Odsetki przez granicę półrocza — asercja WARTOŚCI, nie samo "> 0".
 
-        Test kontrolny: 100 000 zł, due_date 2026-01-10, payment_date 2026-07-20.
+        Test kontrolny: 100 000 zł, due_date 2026-01-12, payment_date 2026-07-20.
         Art. 11b dzieli okres na 30.06/01.07, więc muszą wyjść DWA podokresy:
-            171 dni x 14,00% (M.P. 2025 poz. 1257) = 6 558,90
+            169 dni x 14,00% (M.P. 2025 poz. 1257) = 6 482,19
              20 dni x 13,75% (M.P. 2026 poz. 642)  =   753,42
-        Przed naprawą tabeli drugi podokres leciał po 14,00% (767,12 zł), co
-        dawało 7 326,02 zamiast 7 312,32 — i żaden test tego nie łapał.
+        Przed naprawą tabeli drugi podokres leciał po 14,00%, i żaden test tego
+        nie łapał.
+
+        Fixture miał wcześniej due_date 2026-01-10 — SOBOTĘ. Po wejściu art. 115 KC
+        do kalkulatora taki termin nie może być terminem efektywnym, więc fixture
+        był niepoprawny; 12.01.2026 to dokładnie next_business_day(2026-01-10),
+        czyli ten sam przypadek liczony od daty, na którą wskazuje ustawa.
         """
         detailed = calculate_interest_detailed(
-            Decimal("100000"), date(2026, 1, 10), date(2026, 7, 20)
+            Decimal("100000"), date(2026, 1, 12), date(2026, 7, 20)
         )
         assert [
             (p["from"], p["to"], p["days"], p["rate"]) for p in detailed["periods"]
         ] == [
-            (date(2026, 1, 11), date(2026, 6, 30), 171, 14.00),
+            (date(2026, 1, 13), date(2026, 6, 30), 169, 14.00),
             (date(2026, 7, 1), date(2026, 7, 20), 20, 13.75),
         ]
         assert [p["amount"] for p in detailed["periods"]] == [
-            Decimal("6558.90"),
+            Decimal("6482.19"),
             Decimal("753.42"),
         ]
         # Kanon produkcyjny: calculate_batch -> calculate_interest_detailed,
         # czyli suma zaokrąglonych podokresów. Tabela w wezwaniu musi się spinać.
-        assert detailed["total"] == Decimal("7312.32")
+        assert detailed["total"] == Decimal("7235.61")
         assert sum(p["amount"] for p in detailed["periods"]) == detailed["total"]
 
     def test_rounding_divergence_between_both_functions(self):
@@ -205,9 +327,9 @@ class TestCalculateInterest:
         Ten test istnieje, żeby rozjazd był WIDOCZNY, a nie żeby go błogosławić —
         do ujednolicenia razem z rekompensa-tools.
         """
-        args = (Decimal("100000"), date(2026, 1, 10), date(2026, 7, 20))
-        assert calculate_interest(*args) == Decimal("7312.33")
-        assert calculate_interest_detailed(*args)["total"] == Decimal("7312.32")
+        args = (Decimal("100000"), date(2026, 1, 12), date(2026, 7, 20))
+        assert calculate_interest(*args) == Decimal("7235.62")
+        assert calculate_interest_detailed(*args)["total"] == Decimal("7235.61")
 
     def test_interest_start_override(self):
         """Override startu odsetek (kroczące przedawnienie)."""

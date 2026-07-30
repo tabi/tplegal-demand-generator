@@ -65,18 +65,38 @@ Zapytaj użytkownika jeśli nie sprecyzował.
 - Przedawnienie: 3 lata + koniec roku — kalkulator filtruje automatycznie
 - bank_account może być "___" jeśli wierzyciel go nie podał
 
-**OGRANICZENIE ZAKRESU — dłużnicy publiczni.** Narzędzie obsługuje **wyłącznie
+**Termin płatności podajesz SUROWY z faktury.** Kalkulator sam nakłada korektę
+art. 115 KC (termin w sobotę/niedzielę/święto przechodzi na pierwszy dzień
+roboczy) — od wersji 0.4.0. Nie przeliczaj tego ręcznie i nie podawaj daty już
+przesuniętej „na wszelki wypadek": korekta jest idempotentna, więc data
+skorygowana da ten sam wynik, ale ręczne liczenie dni to niepotrzebne ryzyko.
+Skutki korekty: odsetki startują dzień po terminie EFEKTYWNYM, a faktura
+zapłacona w pierwszy dzień roboczy po weekendowym terminie **nie jest**
+opóźniona (odsetki 0). Uwaga na koniec miesiąca: termin 31.01 wypadający
+w sobotę daje wymagalność w lutym, więc kurs EUR bierze się z ostatniego dnia
+roboczego STYCZNIA — to zmienia też kwotę rekompensaty.
+
+**OGRANICZENIE ZAKRESU — dłużnicy publiczni.** Narzędzie liczy **wyłącznie
 dłużników prywatnych**: podstawa art. 7 ust. 1 u.p.n.o.t.h., stawka z art. 4
-pkt 3 lit. b (stopa referencyjna NBP + 10 p.p.). **Nie obsługuje** dłużników
-będących podmiotami publicznymi — dla nich podstawą roszczenia jest **art. 8
-ust. 1, a nie art. 7**, a gdy podmiot publiczny jest jednocześnie podmiotem
-leczniczym, stawka odsetek wynosi **+8 p.p.** (art. 4 pkt 3 lit. a), nie +10 p.p.
+pkt 3 lit. b (stopa referencyjna NBP + 10 p.p.). Dla dłużnika publicznego
+podstawą jest **art. 8 ust. 1, a nie art. 7**, a gdy podmiot publiczny jest
+jednocześnie podmiotem leczniczym, stawka wynosi **+8 p.p.** (art. 4 pkt 3
+lit. a), nie +10 p.p.
+
+Od wersji 0.4.0 obie te rzeczy są w kodzie: `DebtorType`
+(`private` / `public_non_medical` / `public_medical`), druga kolumna stawek
+`rate_medical` w `INTEREST_RATES` i podstawa prawna w piśmie zależna od statusu
+(placeholder `{{PODSTAWA_ODSETEK}}`). **Naliczanie dla dłużnika publicznego jest
+jednak nadal ZABLOKOWANE** — kalkulator podnosi `NotImplementedError`
+z komunikatem „reżim art. 8 niekompletny". Brakuje ostatniej warstwy: art. 8
+ust. 2/4/4a ogranicza termin zapłaty do 30 dni (60 dni dla podmiotu leczniczego)
+liczonych od **doręczenia** faktury, a eksporty ERP daty doręczenia nie mają.
 
 Jeśli dłużnik wygląda na podmiot publiczny — SPZOZ, szpital, jednostka
 budżetowa, uczelnia, gmina, instytut — **ZATRZYMAJ SIĘ i zapytaj użytkownika.**
-Nie generuj wezwania automatycznie. Pismo wygenerowane tym narzędziem dla
-podmiotu publicznego miałoby błędną podstawę prawną, a dla publicznego podmiotu
-leczniczego dodatkowo zawyżoną stawkę odsetek.
+Nie ustawiaj `debtor_type` samodzielnie „po nazwie": to ocena prawna. Nie próbuj
+też obejść `NotImplementedError` — pismo policzone bez limitu z art. 8 miałoby
+zawyżone odsetki, tak samo jak wcześniej miałoby błędną podstawę prawną.
 
 ### Czego NIE robić
 
@@ -113,15 +133,18 @@ opublikowane.
 2. Otwórz najnowsze **obwieszczenie ministra właściwego do spraw gospodarki**
    (do 2025 r. był to Minister Rozwoju i Technologii, od obwieszczenia na
    I półrocze 2026 — Minister Finansów i Gospodarki).
-3. Obwieszczenie podaje **dwie** stawki. Bierzesz tę z punktu mówiącego
-   „w przypadku transakcji handlowych, w których dłużnikiem **nie** jest podmiot
-   publiczny będący podmiotem leczniczym" — czyli wyższą. Niższa dotyczy
-   publicznych szpitali i ten kalkulator jej nie obsługuje.
+3. Obwieszczenie podaje **dwie** stawki i od wersji 0.4.0 przepisujesz **OBIE**:
+   - `rate` — z punktu „w przypadku transakcji handlowych, w których dłużnikiem
+     **nie** jest podmiot publiczny będący podmiotem leczniczym" (wyższa),
+   - `rate_medical` — z punktu o publicznym podmiocie leczniczym (niższa).
+   Różnica między nimi wynosi zawsze 2,00 p.p. (+10 p.p. vs +8 p.p. do tej samej
+   stopy referencyjnej) i pilnuje tego test `test_rate_medical_o_dwa_punkty_nizsza`.
+   Jeśli test padnie po Twojej edycji — przepisałeś którąś wartość z błędem.
 
 **Co zmienić:** plik `demand_generator/calc.py`, tabela `INTEREST_RATES`. Dopisz
 na SAMYM KOŃCU listy jeden wiersz, kopiując format poprzedniego:
 
-    {"from": "2027-01-01", "to": "2027-06-30", "rate": 12.34},  # M.P. 2026 poz. 1234
+    {"from": "2027-01-01", "to": "2027-06-30", "rate": 12.34, "rate_medical": 10.34},  # M.P. 2026 poz. 1234
 
 Trzy reguły, których nie wolno złamać:
 

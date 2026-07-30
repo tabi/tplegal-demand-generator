@@ -22,6 +22,7 @@ from pathlib import Path
 # Normalizacja nazw podmiotów — import z demand_utils (flat)
 # ---------------------------------------------------------------------------
 
+from demand_generator.calc import DebtorType  # noqa: E402
 from demand_generator.utils import normalize_entity_name  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -165,6 +166,25 @@ def kwota_slownie(amount):
 # ---------------------------------------------------------------------------
 # Art. 10 — referencja ustawowa zależna od tierów
 # ---------------------------------------------------------------------------
+
+def podstawa_odsetek(debtor_type=None) -> str:
+    """Podstawa prawna odsetek za opóźnienie — zależna od statusu dłużnika.
+
+    Art. 7 ust. 1 ustawy z 8.03.2013 WPROST wyłącza transakcje, w których
+    dłużnikiem jest podmiot publiczny — dla nich podstawą jest art. 8 ust. 1.
+    Rekompensata z art. 10 bez zmian (art. 10 ust. 1 odsyła do obu przepisów).
+
+    „powołanej ustawy" jest poprawne, bo pełny tytuł z Dz.U. cytuje wcześniejszy
+    punkt wyliczenia (o rekompensacie).
+
+    None / brak wartości → dłużnik prywatny (tak wygląda cały dotychczasowy
+    portfel; klasyfikacja podmiotu publicznego to świadoma decyzja radcy).
+    """
+    publiczne = {DebtorType.PUBLIC_NON_MEDICAL, DebtorType.PUBLIC_MEDICAL}
+    if debtor_type is not None and DebtorType(debtor_type) in publiczne:
+        return "art. 8 ust. 1 powołanej ustawy"
+    return "art. 7 ust. 1 powołanej ustawy"
+
 
 def art_10_reference(tiers: set) -> str:
     """
@@ -402,6 +422,7 @@ def _build_placeholders(data: dict, variant: dict, use_table: bool) -> dict[str,
         "{{KWOTA_ODSETKI_KC_PLN}}": format_pln(civil_interest_pln),
         "{{NUMER_RACHUNKU}}": data.get("cr_bank", "___"),
         "{{TERMIN_DNI}}": str(variant["deadline_days"]),
+        "{{PODSTAWA_ODSETEK}}": podstawa_odsetek(data.get("debtor_type")),
     }
 
     if not use_table:
