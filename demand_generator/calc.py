@@ -15,10 +15,58 @@ Podstawa prawna:
 import warnings
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
+from enum import Enum
 from typing import Optional
 
 import holidays
 import requests
+
+
+class DebtorType(str, Enum):
+    """Status dłużnika — dwie NIEZALEŻNE osie z art. 4 pkt 3 ustawy z 8.03.2013.
+
+    Oś 1 (publiczny czy nie) rozstrzyga PODSTAWĘ PRAWNĄ odsetek: art. 7 ust. 1
+    wprost wyłącza transakcje, w których dłużnikiem jest podmiot publiczny —
+    dla nich podstawą jest art. 8 ust. 1.
+    Oś 2 (podmiot leczniczy czy nie) rozstrzyga STAWKĘ: art. 4 pkt 3 lit. a daje
+    stopę referencyjną NBP + 8 p.p. dla podmiotu publicznego BĘDĄCEGO podmiotem
+    leczniczym, lit. b + 10 p.p. dla pozostałych.
+
+    Gmina jest więc PUBLIC_NON_MEDICAL: art. 8 ust. 1 + 10 p.p.
+
+    Bliźniak w torze A: rekompensa/calculator/calc.py (tplegal-tools), gdzie te
+    same wartości siedzą w enumie `debtor_type` w bazie. Klasyfikacja podmiotu to
+    OCENA PRAWNA — nie ustawiamy jej regexem po nazwie.
+    """
+
+    PRIVATE = "private"
+    PUBLIC_NON_MEDICAL = "public_non_medical"
+    PUBLIC_MEDICAL = "public_medical"
+
+
+# Komunikat bramki reżimu art. 8 — patrz _require_implemented_debtor_type.
+ART8_NOT_IMPLEMENTED_MSG = (
+    "reżim art. 8 niekompletny — brak limitu terminu z art. 8 ust. 2/4a, "
+    "wymagana decyzja o dacie doręczenia"
+)
+
+
+def _require_implemented_debtor_type(debtor_type: "DebtorType") -> None:
+    """Twardy stop dla dłużników publicznych (art. 8 ust. 1).
+
+    Stawka +8 p.p. i podstawa prawna są już zaimplementowane, ale reżim art. 8
+    ma jeszcze jedną warstwę: art. 8 ust. 2/4/4a ogranicza termin zapłaty do
+    30 dni (60 dni dla podmiotu leczniczego), liczonych od DORĘCZENIA faktury.
+    Eksporty ERP nie zawierają daty doręczenia, więc bez decyzji o domniemaniu
+    (np. data wystawienia + 3 dni) każde naliczenie byłoby zgadywaniem terminu
+    wymagalności. Lepiej niepoliczone niż policzone źle.
+
+    Bramka stoi na WEJŚCIACH liczących kwoty (calculate_interest / _detailed /
+    calculate_invoice / calculate_batch). Sam lookup stawki (get_interest_rate)
+    jej NIE ma — ma pozostać testowalny dla obu kolumn tabeli.
+    """
+    if debtor_type != DebtorType.PRIVATE:
+        raise NotImplementedError(ART8_NOT_IMPLEMENTED_MSG)
 
 
 class UnknownRatePeriodError(RuntimeError):
@@ -35,11 +83,16 @@ class UnknownRatePeriodError(RuntimeError):
 # STAŁE
 # ═══════════════════════════════════════════════════════════════════════
 
-# Stawki odsetek ustawowych za opóźnienie w transakcjach handlowych
-# (stopa referencyjna NBP + 10 p.p. — art. 4 pkt 3 lit. b ustawy z 8.03.2013;
-# dłużnik prywatny, pozostałe przypadki poza zakresem narzędzia — dla dłużnika
-# publicznego podstawą jest art. 8 ust. 1, a dla publicznego podmiotu leczniczego
-# stawka to + 8 p.p. z art. 4 pkt 3 lit. a).
+# Stawki odsetek ustawowych za opóźnienie w transakcjach handlowych.
+# DWIE KOLUMNY, obie z tego samego obwieszczenia M.P. (art. 11c):
+#   "rate"         — art. 4 pkt 3 lit. b: stopa referencyjna NBP + 10 p.p.
+#                    Dłużnik prywatny ORAZ publiczny NIE będący podmiotem
+#                    leczniczym (np. gmina).
+#   "rate_medical" — art. 4 pkt 3 lit. a: stopa referencyjna NBP + 8 p.p.
+#                    WYŁĄCZNIE podmiot publiczny będący podmiotem leczniczym.
+# Inwariant: rate_medical == rate - 2.00 (różne dodatki do tej samej stopy).
+# Uwaga: samo naliczanie dla dłużnika publicznego jest ZABLOKOWANE
+# (_require_implemented_debtor_type) — brakuje limitu terminu z art. 8 ust. 2/4a.
 #
 # Art. 11b: stawka jest ZAMROŻONA na całe półrocze — stosuje się stopę
 # referencyjną NBP z dnia 1 stycznia do odsetek należnych za okres 1.01-30.06
@@ -52,22 +105,23 @@ class UnknownRatePeriodError(RuntimeError):
 INTEREST_RATES = [
     # Oba wiersze 2022 są TO_VERIFY — nie mają cytowanego obwieszczenia. Roszczenia
     # z 2022 r. są już przedawnione (art. 118 KC), więc nie blokują naliczania.
-    {"from": "2022-01-01", "to": "2022-06-30", "rate": 11.75},  # ref 1.75, TO_VERIFY
-    {"from": "2022-07-01", "to": "2022-12-31", "rate": 16.00},  # ref 6.00, TO_VERIFY
-    {"from": "2023-01-01", "to": "2023-06-30", "rate": 16.75},  # ref 6.75, M.P. 2022 poz. 1263
-    {"from": "2023-07-01", "to": "2023-12-31", "rate": 16.75},  # ref 6.75, M.P. 2023 poz. 626
-    {"from": "2024-01-01", "to": "2024-06-30", "rate": 15.75},  # ref 5.75, M.P. 2023 poz. 1465
-    {"from": "2024-07-01", "to": "2024-12-31", "rate": 15.75},  # ref 5.75, M.P. 2024 poz. 546
-    {"from": "2025-01-01", "to": "2025-06-30", "rate": 15.75},  # ref 5.75, M.P. 2024 poz. 1106
-    {"from": "2025-07-01", "to": "2025-12-31", "rate": 15.25},  # ref 5.25, M.P. 2025 poz. 602
-    {"from": "2026-01-01", "to": "2026-06-30", "rate": 14.00},  # ref 4.00, M.P. 2025 poz. 1257
+    {"from": "2022-01-01", "to": "2022-06-30", "rate": 11.75, "rate_medical": 9.75},   # ref 1.75, TO_VERIFY
+    {"from": "2022-07-01", "to": "2022-12-31", "rate": 16.00, "rate_medical": 14.00},  # ref 6.00, TO_VERIFY
+    {"from": "2023-01-01", "to": "2023-06-30", "rate": 16.75, "rate_medical": 14.75},  # ref 6.75, M.P. 2022 poz. 1263
+    {"from": "2023-07-01", "to": "2023-12-31", "rate": 16.75, "rate_medical": 14.75},  # ref 6.75, M.P. 2023 poz. 626
+    {"from": "2024-01-01", "to": "2024-06-30", "rate": 15.75, "rate_medical": 13.75},  # ref 5.75, M.P. 2023 poz. 1465
+    {"from": "2024-07-01", "to": "2024-12-31", "rate": 15.75, "rate_medical": 13.75},  # ref 5.75, M.P. 2024 poz. 546
+    {"from": "2025-01-01", "to": "2025-06-30", "rate": 15.75, "rate_medical": 13.75},  # ref 5.75, M.P. 2024 poz. 1106
+    {"from": "2025-07-01", "to": "2025-12-31", "rate": 15.25, "rate_medical": 13.25},  # ref 5.25, M.P. 2025 poz. 602
+    {"from": "2026-01-01", "to": "2026-06-30", "rate": 14.00, "rate_medical": 12.00},  # ref 4.00, M.P. 2025 poz. 1257
     # Stawka wpisana wprost z obwieszczenia (nie wyliczona z 3,75 + 10 p.p.):
     # M.P. 2026 poz. 642 — obwieszczenie Ministra Finansów i Gospodarki
     # z 22.06.2026 (ogłoszone 26.06.2026) podaje dla okresu 1.07-31.12.2026
     # 13,75% dla dłużnika, który NIE jest podmiotem publicznym będącym podmiotem
-    # leczniczym, oraz 11,75% dla takiego podmiotu (art. 4 pkt 3 lit. a — wariant
-    # +8 p.p. nie jest tu zaimplementowany).
-    {"from": "2026-07-01", "to": "2026-12-31", "rate": 13.75},  # M.P. 2026 poz. 642, ref 3.75
+    # leczniczym, oraz 11,75% dla takiego podmiotu (art. 4 pkt 3 lit. a). OBIE
+    # stawki przepisane wprost z obwieszczenia — one potwierdzają inwariant
+    # rate_medical == rate - 2,00 p.p. dla całej tabeli.
+    {"from": "2026-07-01", "to": "2026-12-31", "rate": 13.75, "rate_medical": 11.75},  # M.P. 2026 poz. 642, ref 3.75
 ]
 
 # Preparse dates
@@ -102,10 +156,23 @@ _nbp_cache: dict[str, Decimal] = {}
 # ═══════════════════════════════════════════════════════════════════════
 
 def next_business_day(d: date) -> date:
-    """Art. 115 KC: jeśli termin wypada w dzień wolny, przesuwa na następny roboczy."""
+    """Art. 115 KC: jeśli termin wypada w dzień wolny, przesuwa na następny roboczy.
+
+    IDEMPOTENTNA: wynik jest zawsze dniem roboczym, więc kolejne wywołanie zwraca
+    tę samą datę. Na tym stoi nakładanie korekty wewnątrz kalkulatora — wywołujący,
+    który skorygował termin sam, dostaje ten sam wynik.
+    """
     while d.weekday() >= 5 or d in PL_HOLIDAYS:
         d += timedelta(days=1)
     return d
+
+
+def compute_effective_due_date(due: date) -> date:
+    """Termin płatności po korekcie art. 115 KC — alias czytelności intencji.
+
+    Bliźniak: rekompensa/dates.py w torze A (tplegal-tools).
+    """
+    return next_business_day(due)
 
 
 def last_business_day_of_month(year: int, month: int) -> date:
@@ -139,22 +206,32 @@ def _unknown_rate_period_error(d: date) -> UnknownRatePeriodError:
     )
 
 
-def get_interest_rate(d: date) -> float:
+def _rate_key(debtor_type: DebtorType) -> str:
+    """Która kolumna tabeli stawek obowiązuje dla danego statusu dłużnika."""
+    return "rate_medical" if debtor_type == DebtorType.PUBLIC_MEDICAL else "rate"
+
+
+def get_interest_rate(d: date, debtor_type: DebtorType = DebtorType.PRIVATE) -> float:
     """Stawka odsetek handlowych obowiązująca w danym dniu.
 
     Art. 11b: stawka jest zamrożona na całe półrocze, więc tabela ma domknięte
     okresy. Data po ostatnim okresie oznacza nieaktualną tabelę, nie "brak
     zmiany" — dlatego jest to błąd, a nie fallback.
+
+    debtor_type wybiera kolumnę: PUBLIC_MEDICAL bierze +8 p.p. (art. 4 pkt 3
+    lit. a), pozostałe +10 p.p. (lit. b). Sam lookup nie ma bramki reżimu art. 8 —
+    nie produkuje kwoty roszczenia.
     """
+    key = _rate_key(debtor_type)
     for r in INTEREST_RATES:
         if r["from_d"] <= d <= r["to_d"]:
-            return r["rate"]
+            return r[key]
     if d > INTEREST_RATES[-1]["to_d"]:
         raise _unknown_rate_period_error(d)
     # Data przed początkiem tabeli. Zachowane dotychczasowe zachowanie — takie
     # roszczenia są i tak przedawnione (art. 118 KC), a zmiana tej gałęzi jest
     # poza zakresem tej poprawki.
-    return INTEREST_RATES[-1]["rate"]
+    return INTEREST_RATES[-1][key]
 
 
 def _interest_start_date(due_date: date, interest_start_override: Optional[date]) -> date:
@@ -181,13 +258,14 @@ def _iter_interest_periods(
     gross: Decimal,
     start_date: date,
     payment_date: date,
+    debtor_type: DebtorType = DebtorType.PRIVATE,
 ) -> list[dict]:
     """Podziel okres naliczania na podokresy stawek i policz kwoty."""
     periods = []
     current = start_date
 
     while current <= payment_date:
-        rate = get_interest_rate(current)
+        rate = get_interest_rate(current, debtor_type)
         period_end = _interest_rate_period_end(current, payment_date)
         days = (period_end - current).days + 1
         raw_amount = gross * Decimal(str(rate)) / Decimal("100") * Decimal(str(days)) / Decimal("365")
@@ -210,6 +288,7 @@ def calculate_interest(
     due_date: date,
     payment_date: date,
     interest_start_override: Optional[date] = None,
+    debtor_type: DebtorType = DebtorType.PRIVATE,
 ) -> Decimal:
     """
     Oblicza odsetki za opóźnienie w transakcji handlowej (art. 7 ust. 1).
@@ -218,14 +297,21 @@ def calculate_interest(
 
     Args:
         gross: kwota brutto faktury
-        due_date: termin płatności (po korekcie art. 115 KC)
+        due_date: termin płatności SUROWY z faktury — korektę art. 115 KC
+            kalkulator nakłada sam (idempotentnie, więc data już skorygowana
+            przez wywołującego daje ten sam wynik)
         payment_date: data faktycznej zapłaty
         interest_start_override: jeśli podany, odsetki liczone od tej daty
             (kroczące przedawnienie — odcięcie przedawnionych dni)
+        debtor_type: status dłużnika; != PRIVATE podnosi NotImplementedError
+            (reżim art. 8 niekompletny)
 
     Returns:
         Kwota odsetek w PLN, zaokrąglona do 2 miejsc.
     """
+    _require_implemented_debtor_type(debtor_type)
+    due_date = compute_effective_due_date(due_date)
+
     if payment_date <= due_date:
         return Decimal("0")
 
@@ -234,7 +320,12 @@ def calculate_interest(
         return Decimal("0")
 
     total = sum(
-        (period["raw_amount"] for period in _iter_interest_periods(gross, start_date, payment_date)),
+        (
+            period["raw_amount"]
+            for period in _iter_interest_periods(
+                gross, start_date, payment_date, debtor_type
+            )
+        ),
         Decimal("0"),
     )
 
@@ -246,6 +337,7 @@ def calculate_interest_detailed(
     due_date: date,
     payment_date: date,
     interest_start_override: Optional[date] = None,
+    debtor_type: DebtorType = DebtorType.PRIVATE,
 ) -> dict:
     """
     Jak calculate_interest, ale zwraca szczegóły podokresów.
@@ -258,6 +350,9 @@ def calculate_interest_detailed(
             "end_date": date,
         }
     """
+    _require_implemented_debtor_type(debtor_type)
+    due_date = compute_effective_due_date(due_date)
+
     result = {"total": Decimal("0"), "periods": [], "start_date": None, "end_date": None}
 
     if payment_date <= due_date:
@@ -270,7 +365,7 @@ def calculate_interest_detailed(
     result["start_date"] = start_date
     result["end_date"] = payment_date
 
-    for period in _iter_interest_periods(gross, start_date, payment_date):
+    for period in _iter_interest_periods(gross, start_date, payment_date, debtor_type):
         result["periods"].append({
             "from": period["from"],
             "to": period["to"],
@@ -321,7 +416,12 @@ def get_compensation_eur_rate_date(due_date: date) -> date:
     """
     Art. 10 ust. 1a: kurs EUR z ostatniego dnia roboczego miesiąca
     POPRZEDZAJĄCEGO miesiąc, w którym świadczenie stało się wymagalne.
+
+    Wymagalność liczona od terminu PO korekcie art. 115 KC — termin z końca
+    miesiąca wypadający w dzień wolny przenosi więc miesiąc kursu (31.01.2026 to
+    sobota → wymagalność w lutym → kurs z 30.01.2026). Korekta jest idempotentna.
     """
+    due_date = compute_effective_due_date(due_date)
     if due_date.month == 1:
         prev_month = 12
         prev_year = due_date.year - 1
@@ -357,6 +457,10 @@ def calculate_compensation(gross: Decimal, due_date: date) -> dict:
     """
     Oblicza rekompensatę za koszty odzyskiwania należności (art. 10 ust. 1).
     Per invoice, per TSUE C-585/20.
+
+    due_date surowa — korekta art. 115 KC nakładana wewnątrz (przez
+    get_compensation_eur_rate_date). Art. 10 ust. 1 odsyła i do art. 7 ust. 1,
+    i do art. 8 ust. 1, więc sama rekompensata nie zależy od statusu dłużnika.
 
     Returns:
         {
@@ -402,7 +506,8 @@ def calculate_civil_interest_for_invoice(
 
     Args:
         compensation_pln: kwota rekompensaty PLN
-        due_date: termin płatności faktury (dzień wymagalności rekompensaty)
+        due_date: termin płatności faktury SUROWY (dzień wymagalności
+            rekompensaty) — korekta art. 115 KC nakładana wewnątrz
         cutoff_date: dzień naliczania do (None → date.today())
 
     Returns:
@@ -416,7 +521,7 @@ def calculate_civil_interest_for_invoice(
     try:
         return calculate_civil_interest(
             amount_pln=compensation_pln,
-            start_date=due_date + timedelta(days=1),
+            start_date=compute_effective_due_date(due_date) + timedelta(days=1),
             end_date=cutoff_date,
         )
     except ValueError:
@@ -442,9 +547,9 @@ def prescription_expiry_date(claim_accrual_date: date) -> date:
 def is_fully_prescribed(due_date: date, lawsuit_date: date) -> bool:
     """
     Czy roszczenie (rekompensata + pierwszy dzień odsetek) jest przedawnione?
-    Dies a quo = due_date + 1.
+    Dies a quo = dzień po terminie PO korekcie art. 115 KC.
     """
-    claim_accrual = due_date + timedelta(days=1)
+    claim_accrual = compute_effective_due_date(due_date) + timedelta(days=1)
     expiry = prescription_expiry_date(claim_accrual)
     return lawsuit_date > expiry
 
@@ -471,8 +576,11 @@ def find_earliest_non_prescribed_interest_date(
 
 
 def check_near_expiry(due_date: date, reference_date: date, threshold_days: int = 183) -> bool:
-    """Czy roszczenie przedawni się w ciągu threshold_days (domyślnie ~6 miesięcy)?"""
-    claim_accrual = due_date + timedelta(days=1)
+    """Czy roszczenie przedawni się w ciągu threshold_days (domyślnie ~6 miesięcy)?
+
+    due_date surowa — korekta art. 115 KC nakładana wewnątrz (idempotentnie).
+    """
+    claim_accrual = compute_effective_due_date(due_date) + timedelta(days=1)
     expiry = prescription_expiry_date(claim_accrual)
     days_left = (expiry - reference_date).days
     return 0 < days_left <= threshold_days
@@ -538,6 +646,7 @@ def calculate_invoice(
     payment_date: date,
     lawsuit_date: Optional[date] = None,
     cutoff_date: Optional[date] = None,
+    debtor_type: DebtorType = DebtorType.PRIVATE,
 ) -> dict:
     """
     Pełna kalkulacja dla jednej faktury: rekompensata + odsetki handlowe
@@ -545,11 +654,14 @@ def calculate_invoice(
 
     Args:
         gross: kwota brutto
-        due_date: termin płatności (po art. 115 KC)
+        due_date: termin płatności SUROWY z faktury — korekta art. 115 KC
+            nakładana wewnątrz (idempotentnie); `delay_days` jest więc liczone
+            od terminu efektywnego
         payment_date: data zapłaty
         lawsuit_date: planowana data pozwu (None = bez filtra przedawnienia)
         cutoff_date: dzień do którego liczymy odsetki KC od rekompensaty
             (None = date.today())
+        debtor_type: status dłużnika; != PRIVATE podnosi NotImplementedError
 
     Returns:
         {
@@ -563,6 +675,9 @@ def calculate_invoice(
             "delay_days": int,
         }
     """
+    _require_implemented_debtor_type(debtor_type)
+    due_date = compute_effective_due_date(due_date)
+
     result = {
         "delay_days": max(0, (payment_date - due_date).days),
         "prescription_status": "NIEPRZEDAWNIONE",
@@ -597,7 +712,11 @@ def calculate_invoice(
             result["prescribed_days"] = (earliest - interest_start).days
 
     result["interest_detailed"] = calculate_interest_detailed(
-        gross, due_date, payment_date, interest_start_override=adjusted_start
+        gross,
+        due_date,
+        payment_date,
+        interest_start_override=adjusted_start,
+        debtor_type=debtor_type,
     )
     result["interest"] = result["interest_detailed"]["total"]
 
@@ -618,6 +737,7 @@ def calculate_batch(
     invoices: list[dict],
     lawsuit_date: Optional[date] = None,
     cutoff_date: Optional[date] = None,
+    debtor_type: DebtorType = DebtorType.PRIVATE,
 ) -> dict:
     """
     Kalkulacja batcha faktur.
@@ -625,12 +745,14 @@ def calculate_batch(
     Args:
         invoices: lista dict z kluczami:
             - gross (Decimal): kwota brutto
-            - due_date (date): termin płatności
+            - due_date (date): termin płatności SUROWY (korekta art. 115 KC
+              nakładana wewnątrz calculate_invoice)
             - payment_date (date): data zapłaty
             - invoice_number (str, optional): numer faktury
         lawsuit_date: planowana data pozwu
         cutoff_date: dzień naliczania odsetek KC od rekompensaty
             (None = date.today())
+        debtor_type: status dłużnika; != PRIVATE podnosi NotImplementedError
 
     Returns:
         {
@@ -649,6 +771,8 @@ def calculate_batch(
             "tiers": set[str],
         }
     """
+    _require_implemented_debtor_type(debtor_type)
+
     results = []
     total_comp_eur = Decimal("0")
     total_comp_pln = Decimal("0")
@@ -665,6 +789,7 @@ def calculate_batch(
             payment_date=inv["payment_date"],
             lawsuit_date=lawsuit_date,
             cutoff_date=cutoff_date,
+            debtor_type=debtor_type,
         )
         calc["invoice_number"] = inv.get("invoice_number", "")
 
