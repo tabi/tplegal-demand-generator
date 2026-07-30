@@ -68,3 +68,71 @@ def normalize_entity_name(name: str) -> str:
         name = pattern.sub(replacement, name)
 
     return name
+
+
+# ---------------------------------------------------------------------------
+# Status dłużnika w JSON-ie — wykrywanie klucza zapisanego inaczej
+# ---------------------------------------------------------------------------
+
+DEBTOR_TYPE_KEY = "debtor_type"
+
+
+def _normalized_key(key: str) -> str:
+    """Klucz bez znaków nieliterowych, małymi literami: 'debtorType' -> 'debtortype'."""
+    return re.sub(r"[^a-z0-9]", "", key.lower())
+
+
+def find_misspelled_debtor_type_keys(payload) -> list[str]:
+    """Klucze, które ZNACZĄ status dłużnika, ale nie nazywają się `debtor_type`.
+
+    Model budujący JSON pisze czasem `debtorType`, `debtor-type` albo
+    `"debtor_type "` ze spacją — a taki klucz zostałby po cichu zignorowany
+    i kwalifikacja prawna podana przez radcę wyparowałaby bez śladu. Skoro
+    zasadą tej ścieżki jest „brak statusu wolno przyjąć, ale nie po cichu",
+    to status PODANY i nieprzeczytany musi być błędem.
+
+    Szuka też w zagnieżdżeniach (pozycje `invoices`, obiekt `debtor`), bo tam
+    klucz jest równie niewidoczny dla parsera jak literówka.
+
+    Zwraca posortowane, unikalne nazwy kluczy — pusta lista znaczy „czysto".
+    """
+    found: set[str] = set()
+
+    def walk(node) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if isinstance(key, str) and _normalized_key(key) == "debtortype":
+                    if key != DEBTOR_TYPE_KEY:
+                        found.add(key)
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(payload)
+    return sorted(found)
+
+
+def nested_debtor_type_values(payload) -> list[str]:
+    """Wartości `debtor_type` schowane GŁĘBIEJ niż top-level JSON-a.
+
+    `{"invoices": [{..., "debtor_type": "public_medical"}]}` parsuje się bez
+    błędu, a status jest ignorowany — kalkulator czyta wyłącznie klucz
+    najwyższego poziomu. Cicho zignorowana kwalifikacja prawna to ta sama klasa
+    defektu co cichy fallback na `private`.
+    """
+    found: list[str] = []
+
+    def walk(node, top: bool) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == DEBTOR_TYPE_KEY and not top:
+                    found.append(str(value))
+                else:
+                    walk(value, False)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item, False)
+
+    walk(payload, True)
+    return found

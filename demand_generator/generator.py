@@ -23,7 +23,20 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 from demand_generator.calc import DebtorType  # noqa: E402
-from demand_generator.utils import normalize_entity_name  # noqa: E402
+from demand_generator.utils import (  # noqa: E402
+    DEBTOR_TYPE_KEY,
+    find_misspelled_debtor_type_keys,
+    normalize_entity_name,
+)
+
+# Brak statusu dłużnika = pismo powołujące art. 7 ust. 1. Wolno tak przyjąć (cały
+# dotychczasowy portfel jest prywatny), ale nie po cichu — bliźniak komunikatu
+# z calc_cli, bo pismo i kwota muszą mówić to samo także o tym, czego nie wiedzą.
+NO_DEBTOR_TYPE_WARNING = (
+    'UWAGA: brak "debtor_type" — pismo powoła art. 7 ust. 1 (dłużnik prywatny). '
+    "Dla podmiotu publicznego, w tym leczniczego, wezwania z tego narzędzia nie "
+    "generujemy: podstawą jest art. 8 ust. 1, a reżim art. 8 jest niekompletny."
+)
 
 # ---------------------------------------------------------------------------
 # Warianty tonalne — single source of truth in demand_variants.py
@@ -179,9 +192,24 @@ def podstawa_odsetek(debtor_type=None) -> str:
 
     None / brak wartości → dłużnik prywatny (tak wygląda cały dotychczasowy
     portfel; klasyfikacja podmiotu publicznego to świadoma decyzja radcy).
+
+    Od wersji 0.5.0 gałąź z art. 8 ust. 1 jest z generatora NIEOSIĄGALNA:
+    _require_private_debtor odmawia wcześniej wygenerowania pisma, bo kwoty dla
+    podmiotu publicznego są zablokowane w kalkulatorze. Brzmienie zostaje na
+    czas, gdy reżim art. 8 zostanie domknięty — usunięcie go wróciłoby wtedy
+    jako regresja.
     """
+    # Puste/białe znaki liczą się jak brak wartości — tak samo, jak czyta je
+    # bramka _require_private_debtor. Bez tego pismo dla `"debtor_type": ""`
+    # padało na ValueError z wnętrza enuma, choć bramka tę samą wartość właśnie
+    # uznała za brak statusu.
+    if isinstance(debtor_type, str):
+        debtor_type = debtor_type.strip()
+    if not debtor_type:
+        return "art. 7 ust. 1 powołanej ustawy"
+
     publiczne = {DebtorType.PUBLIC_NON_MEDICAL, DebtorType.PUBLIC_MEDICAL}
-    if debtor_type is not None and DebtorType(debtor_type) in publiczne:
+    if DebtorType(debtor_type) in publiczne:
         return "art. 8 ust. 1 powołanej ustawy"
     return "art. 7 ust. 1 powołanej ustawy"
 
@@ -370,9 +398,74 @@ def build_invoice_table_xml(invoices_detail: list[dict]) -> str:
     return f'<w:p><w:pPr><w:spacing w:after="0"/></w:pPr></w:p>{table}<w:p><w:pPr><w:spacing w:after="0"/></w:pPr></w:p>'
 
 
+def _require_private_debtor(data: dict) -> None:
+    """Odmowa wygenerowania wezwania dla dłużnika publicznego.
+
+    Bez tej bramki generator wystawiał pismo WEWNĘTRZNIE SPRZECZNE: placeholder
+    {{PODSTAWA_ODSETEK}} czytał debtor_type i pisał „art. 8 ust. 1", a kwoty
+    przychodziły z kalkulatora, który dla podmiotu publicznego nie ma jak ich
+    policzyć (art. 8 ust. 2/4a — limit terminu od DORĘCZENIA faktury, patrz
+    _require_implemented_debtor_type w calc.py). Do wersji 0.4.0 nikt tego nie
+    zauważał, bo CLI kalkulatora statusu w ogóle nie przyjmowało.
+
+    Brak wartości = dłużnik prywatny — tak wygląda cały dotychczasowy portfel.
+    O tej domyślnej wartości ostrzega calc_cli przy liczeniu kwot; tutaj byłoby
+    to ostrzeżenie o statusie, którego to pismo i tak nie zmienia.
+
+    podstawa_odsetek() zostaje z brzmieniem art. 8 — bramka jest zdjęciem
+    ZAKRESU na czas, w którym reżim art. 8 jest niekompletny, nie usunięciem
+    obsługi podmiotów publicznych. Kolumna rate_medical w calc.py stoi tam
+    z tego samego powodu.
+    """
+    # Status podany pod nazwą, której nie czytamy (`debtorType`, `debtor-type`,
+    # klucz ze spacją), zniknąłby bez śladu — a to kwalifikacja prawna, nie
+    # literówka w adresie. Dlatego błąd, nie ciche pominięcie.
+    misspelled = find_misspelled_debtor_type_keys(data)
+    if misspelled:
+        raise ValueError(
+            "status dłużnika podany pod nieczytanym kluczem: "
+            f"{', '.join(repr(k) for k in misspelled)}. Generator czyta wyłącznie "
+            f'"{DEBTOR_TYPE_KEY}" — popraw nazwę klucza, żeby kwalifikacja nie '
+            "została po cichu pominięta."
+        )
+
+    raw = data.get(DEBTOR_TYPE_KEY)
+    if isinstance(raw, str):
+        raw = raw.strip()
+    if not raw:
+        # Ta sama zasada co w kalkulatorze: wartość domyślną wolno przyjąć, ale
+        # nie po cichu. Pismo powoła art. 7 ust. 1, więc czytelnik ma o tym
+        # wiedzieć, zamiast wnioskować z braku komunikatu.
+        print(NO_DEBTOR_TYPE_WARNING, file=sys.stderr)
+        return
+
+    try:
+        debtor_type = DebtorType(raw)
+    except ValueError:
+        raise ValueError(
+            f"nieznana wartość debtor_type={raw!r}. Dozwolone: "
+            f"{', '.join(t.value for t in DebtorType)}."
+        )
+
+    if debtor_type != DebtorType.PRIVATE:
+        raise ValueError(
+            f"Dłużnik publiczny (debtor_type={debtor_type.value}) — wezwania nie "
+            "generujemy. Podstawą odsetek jest art. 8 ust. 1, a nie art. 7 ust. 1, "
+            "a reżim art. 8 jest niekompletny: art. 8 ust. 2/4a liczy termin "
+            "zapłaty od DORĘCZENIA faktury, czego eksporty ERP nie zawierają. "
+            "NIE zmieniaj statusu na 'private', żeby obejść blokadę — dostaniesz "
+            "pismo z błędną podstawą prawną i zawyżonymi odsetkami. Zgłoś sprawę "
+            "radcy."
+        )
+
+
 def _validate_template_input(template_path: Path, data: dict) -> None:
     if not template_path.exists():
         raise FileNotFoundError(f"Template not found: {template_path}")
+
+    # Przed brakami pól, bo dla dłużnika publicznego pismo nie powstanie nawet
+    # z kompletnymi danymi — uzupełnianie pól byłoby pracą na darmo.
+    _require_private_debtor(data)
 
     missing = [f for f in REQUIRED_FIELDS if f not in data or data[f] is None]
     if missing:
