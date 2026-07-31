@@ -592,8 +592,15 @@ def check_near_expiry(due_date: date, reference_date: date, threshold_days: int 
 
 def court_fee(wps: Decimal) -> Decimal:
     """
-    Opłata sądowa wg art. 13 ust. 1 ustawy o kosztach sądowych
-    (t.j. Dz.U. 2024 poz. 959).
+    Opłata sądowa wg art. 13 ustawy o kosztach sądowych w sprawach cywilnych
+    (t.j. Dz.U. 2025 poz. 1228): ust. 1 to widełki stałe do 20 000 zł, ust. 2
+    opłata stosunkowa 5% powyżej, a art. 21 każe zaokrąglić końcówkę W GÓRĘ
+    do pełnego złotego.
+
+    Cytowany wcześniej t.j. Dz.U. 2024 poz. 959 ma w ISAP status wygaśnięcia.
+    Brzmienie art. 13 i art. 21 jest w obu tekstach identyczne, więc podmiana
+    jest porządkowa — żadna kwota się nie zmienia. Nowela Dz.U. 2026 poz. 346
+    rusza u.k.s.c., ale wchodzi w życie dopiero 30.09.2028.
     """
     wps = Decimal(str(wps))
     brackets = [
