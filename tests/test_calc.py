@@ -10,7 +10,7 @@ Uruchomienie:
 import json
 import tempfile
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING
 from pathlib import Path
 from unittest.mock import patch
 
@@ -568,6 +568,49 @@ class TestCourtFee:
         """Max opłata = 200 000 PLN."""
         fee = court_fee(Decimal("10000000"))
         assert fee == Decimal("200000")
+
+    def test_art_21_koncowka_zaokraglona_w_gore(self):
+        """Art. 21 u.k.s.c.: „Końcówkę opłaty zaokrągla się w górę do pełnego złotego".
+
+        Gałąź stosunkowa (art. 13 ust. 2 — 5% wartości przedmiotu sporu). Do
+        31.07.2026 moduł zaokrąglał tu ROUND_HALF_UP, więc przy końcówce
+        mniejszej niż 0,50 zł opłata wychodziła o złotówkę ZA NISKO. Wartości
+        w komentarzach to wynik sprzed poprawki — ten test pilnuje, żeby nie
+        wrócił.
+        """
+        assert court_fee(Decimal("20000.01")) == Decimal("1001")   # HALF_UP: 1000
+        assert court_fee(Decimal("20000.10")) == Decimal("1001")   # HALF_UP: 1000
+        assert court_fee(Decimal("24300.20")) == Decimal("1216")   # HALF_UP: 1215
+        assert court_fee(Decimal("123456.78")) == Decimal("6173")
+        assert court_fee(Decimal("999999.99")) == Decimal("50000")
+
+    def test_art_21_oplata_nigdy_ponizej_pieciu_procent(self):
+        """Inwariant ustawowy na całej gałęzi stosunkowej, nie na wybranych punktach.
+
+        Zaokrąglenie w dół łamie art. 13 ust. 2: opłata robi się MNIEJSZA niż
+        5% wartości. Przebieg co grosz po zakresie, w którym rozjazd HALF_UP
+        vs CEILING występuje najgęściej — na 4 001 kwotach z 20 000,00–20 040,00
+        stare zaokrąglanie zaniżało 1 998 razy, czyli na połowie wartości.
+        """
+        wps = Decimal("20000.00")
+        koniec = Decimal("20040.00")
+        while wps <= koniec:
+            fee = court_fee(wps)
+            expected = (wps * Decimal("0.05")).quantize(
+                Decimal("1"), rounding=ROUND_CEILING
+            )
+            assert fee == expected, f"WPS {wps}: {fee} != {expected}"
+            assert fee >= wps * Decimal("0.05"), f"WPS {wps}: opłata poniżej 5%"
+            wps += Decimal("0.01")
+
+    def test_art_21_nie_przebija_maksimum(self):
+        """Zaokrąglanie w górę nie może przekroczyć limitu 200 000 zł.
+
+        Przy WPS 4 000 000,01 samo 5% daje 200 000,0005 — ROUND_CEILING podnosi
+        to do 200 001, więc limit musi zadziałać PO zaokrągleniu.
+        """
+        assert court_fee(Decimal("4000000.00")) == Decimal("200000")
+        assert court_fee(Decimal("4000000.01")) == Decimal("200000")
 
 
 class TestLegalRepresentationCost:
