@@ -3,6 +3,17 @@
 ### Instalacja (wykonaj na starcie konwersacji)
 pip install git+https://github.com/tabi/tplegal-demand-generator.git requests holidays --break-system-packages
 
+**Potem sprawdź, co realnie zainstalowałeś:**
+
+    calc-rekompensa --version
+
+Wersja **niższa niż 0.5.0 nie czyta statusu dłużnika w ogóle** — klucz
+`debtor_type` i flaga `--debtor-type` są tam po cichu ignorowane, a bramka dla
+podmiotów publicznych jest nieosiągalna. Na takiej wersji **brak ostrzeżenia nic
+nie znaczy**: wezwanie dla szpitala policzy się po stawce dla dłużnika
+prywatnego. Jeśli `--version` pokazuje mniej niż 0.5.0, powtórz instalację
+z `--force-reinstall` i sprawdź ponownie, zanim policzysz cokolwiek.
+
 ### Template
 Template wezwania znajduje się w Knowledge tego Projectu: `wezwanie_template.docx`
 Po instalacji skopiuj go: `cp /mnt/user-data/uploads/wezwanie_template.docx /home/claude/template.docx`
@@ -35,6 +46,19 @@ zastosowania i trzeba zatrzymać się przed krokiem 2.
 }
 ```
 
+**Do tego schematu świadomie NIE wpisano `debtor_type`.** Ten blok jest kopiowany
+do kolejnych spraw, a status dłużnika to kwalifikacja prawna z art. 4 pkt 3 —
+wpisany „na zapas" `"private"` uciszyłby ostrzeżenie kalkulatora i podstawiłby
+twierdzenie, którego nikt nie sprawdził. Klucz `debtor_type` (wartości `private`,
+`public_non_medical`, `public_medical`) albo flagę `--debtor-type` dodawaj
+**tylko wtedy, gdy status jest znany** — i **w jednym miejscu**: gdy flaga i JSON
+się różnią, kalkulator kończy błędem, bo co najmniej jedna z tych wartości
+deklaruje podmiot publiczny. Bez klucza kalkulator przyjmuje dłużnika prywatnego
+i **o tym ostrzega** — czytaj „OGRANICZENIE ZAKRESU" niżej, bo wartości publiczne
+są dziś zablokowane. Klucz zapisany inaczej (`debtorType`, `debtor-type`) albo
+schowany wewnątrz `invoices` **kończy błędem** — status nie ma prawa zniknąć po
+cichu.
+
 ### Schemat JSON — generator (demand_input.json)
 ```json
 {
@@ -54,6 +78,11 @@ zastosowania i trzeba zatrzymać się przed krokiem 2.
   "invoice_tiers": ["EUR_40", "EUR_70"]
 }
 ```
+
+Jeśli w JSON-ie kalkulatora był klucz `debtor_type`, **przenieś go tutaj tą samą
+wartością.** Generator używa go do podstawy prawnej odsetek w piśmie i odmawia
+wygenerowania wezwania dla wartości publicznych — rozbieżność między dwoma
+JSON-ami dałaby pismo policzone inaczej, niż mówi jego uzasadnienie.
 
 ### Strategia tonalna
 Domyślna: standard_collect. Dostępne: soft_collect, standard_collect, hard_collect, pre_litigation.
@@ -97,6 +126,33 @@ budżetowa, uczelnia, gmina, instytut — **ZATRZYMAJ SIĘ i zapytaj użytkownik
 Nie ustawiaj `debtor_type` samodzielnie „po nazwie": to ocena prawna. Nie próbuj
 też obejść `NotImplementedError` — pismo policzone bez limitu z art. 8 miałoby
 zawyżone odsetki, tak samo jak wcześniej miałoby błędną podstawę prawną.
+
+**Od wersji 0.5.0 blokada jest osiągalna z linii komend.** Do 0.4.0
+`calc-rekompensa` statusu dłużnika w ogóle nie przyjmowało: leciała wartość
+domyślna `private`, więc publiczny szpital liczył się po 13,75% zamiast 11,75%,
+a `NotImplementedError` nie padał nigdy. Co się zmieniło:
+
+- status podajesz flagą `--debtor-type private|public_non_medical|public_medical`
+  albo kluczem `"debtor_type"` w invoices.json — **w jednym miejscu**. Sprzeczność
+  między flagą a JSON-em = `⛔` i kod wyjścia 1: skoro wartości się różnią, co
+  najmniej jedna deklaruje podmiot publiczny, a która mówi prawdę, jest oceną
+  prawną, nie wyborem narzędzia. **Nie „nadpisuj" statusu flagą `private`** —
+  to obejście blokady, którego zakazuje akapit wyżej;
+- **brak statusu nadal znaczy `private`**, ale kalkulator przy każdym takim
+  uruchomieniu pisze na stderr, że przyjął dłużnika prywatnego (art. 7 ust. 1,
+  +10 p.p.). To ostrzeżenie, nie błąd — wynik na stdout jest normalnym JSON-em;
+- wartość publiczna = `⛔` na stderr i kod wyjścia **1**, bez żadnej kwoty na
+  stdout;
+- `generate-demand` odmawia wygenerowania pisma, gdy `debtor_type` w JSON-ie
+  jest publiczny (`ERROR: Dłużnik publiczny …`, kod 1). Wcześniej takie pismo
+  powstawało — powoływało art. 8 ust. 1 przy kwocie policzonej po art. 7, czyli
+  było sprzeczne samo z sobą;
+- literówka w statusie (`"publiczny"`, `"szpital"`) to błąd, a nie ciche zejście
+  na wartość domyślną.
+
+**Nie dopisuj `--debtor-type private` odruchowo, żeby uciszyć ostrzeżenie.**
+Ostrzeżenie jest adresowane do użytkownika — przekaż mu je razem
+z podsumowaniem. Status wpisuj tylko wtedy, gdy ustalił go radca.
 
 ### Czego NIE robić
 

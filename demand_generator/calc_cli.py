@@ -5,6 +5,7 @@ rekompensa.pl — CLI do kalkulatora rekompensat i odsetek handlowych.
 Użycie:
     calc-rekompensa --json invoices.json
     calc-rekompensa --json invoices.json --lawsuit-date 2026-04-15
+    calc-rekompensa --json invoices.json --debtor-type private   (status od radcy)
 
 Schemat JSON input:
     {
@@ -16,7 +17,8 @@ Schemat JSON input:
                 "payment_date": "2024-06-20"
             }
         ],
-        "lawsuit_date": "2026-04-15"  // opcjonalne
+        "lawsuit_date": "2026-04-15",   // opcjonalne
+        "debtor_type": "private"        // opcjonalne; brak = private + ostrzeżenie
     }
 """
 
@@ -28,8 +30,32 @@ from decimal import Decimal
 from pathlib import Path
 
 from demand_generator import __version__
-from demand_generator.calc import calculate_batch
+from demand_generator.calc import DebtorType, calculate_batch
 from demand_generator.check_rates import warn_if_stale
+from demand_generator.utils import (
+    DEBTOR_TYPE_KEY,
+    find_misspelled_debtor_type_keys,
+    nested_debtor_type_values,
+)
+
+# Status dłużnika rozstrzyga PODSTAWĘ PRAWNĄ (art. 7 ust. 1 vs art. 8 ust. 1)
+# i STAWKĘ (+10 p.p. z art. 4 pkt 3 lit. b vs +8 p.p. z lit. a dla publicznego
+# podmiotu leczniczego). Do wersji 0.4.0 CLI go w ogóle nie przyjmowało: leciała
+# domyślna wartość PRIVATE, więc szpital liczył się po 13,75% zamiast 11,75%,
+# a bramka reżimu art. 8 w calc.py była nieosiągalna z linii komend.
+DEBTOR_TYPE_CHOICES = [t.value for t in DebtorType]
+
+# Brak statusu NIE jest błędem: cały dotychczasowy portfel jest prywatny, a twardy
+# stop unieważniłby każdy istniejący JSON. Ale cisza była właściwą przyczyną tej
+# klasy defektu, więc domyślna wartość jest OGŁASZANA. Na stderr, bo stdout to
+# JSON wyniku — tak samo robi warn_if_stale().
+NO_DEBTOR_TYPE_WARNING = (
+    "UWAGA: nie podano statusu dłużnika — przyjęto dłużnika PRYWATNEGO "
+    "(art. 7 ust. 1, stawka +10 p.p. z art. 4 pkt 3 lit. b). Dla podmiotu "
+    "publicznego, w tym leczniczego, podaj --debtor-type albo klucz "
+    '"debtor_type" w JSON-ie. Klasyfikacja wg art. 4 pkt 3 to ocena prawna '
+    "radcy, nie domysł z nazwy."
+)
 
 
 class _DecimalEncoder(json.JSONEncoder):
@@ -42,6 +68,103 @@ class _DecimalEncoder(json.JSONEncoder):
         if isinstance(obj, set):
             return sorted(obj)
         return super().default(obj)
+
+
+def _require_readable_debtor_type_keys(payload) -> None:
+    """Status podany w miejscu/pod nazwą, których parser nie czyta = błąd.
+
+    Cicho zignorowana kwalifikacja z art. 4 pkt 3 jest gorsza niż jej brak: brak
+    dostaje ostrzeżenie, a zignorowany klucz wygląda jak sukces. Dlatego
+    `debtorType`, `debtor-type` czy `debtor_type` wewnątrz pozycji `invoices`
+    kończą pracę, zamiast schodzić na wartość domyślną.
+    """
+    misspelled = find_misspelled_debtor_type_keys(payload)
+    if misspelled:
+        print(
+            f"ERROR: status dłużnika podany pod nieczytanym kluczem: "
+            f"{', '.join(repr(k) for k in misspelled)}. Kalkulator czyta wyłącznie "
+            f'"{DEBTOR_TYPE_KEY}" na najwyższym poziomie JSON-a — popraw nazwę '
+            "klucza, żeby kwalifikacja nie została po cichu pominięta.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    nested = nested_debtor_type_values(payload)
+    if nested:
+        print(
+            f'ERROR: "{DEBTOR_TYPE_KEY}" znaleziony w zagnieżdżeniu '
+            f"(wartości: {', '.join(repr(v) for v in nested)}), a czytany jest "
+            "tylko klucz najwyższego poziomu. Przenieś go obok \"invoices\" — "
+            "status dłużnika dotyczy całej sprawy, nie pojedynczej faktury.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+def _parse_debtor_type(value, source: str) -> DebtorType:
+    """Wartość → DebtorType. Niepoprawna kończy pracę, nie schodzi na domyślną.
+
+    Literówka w statusie prawnym nie ma prawa cicho zejść na `private` — a bywa
+    złośliwa: „publiczny" znaczy dokładnie odwrotność wartości domyślnej.
+    """
+    try:
+        return DebtorType(value)
+    except (ValueError, TypeError):
+        print(
+            f"ERROR: nieznany debtor_type ({source}): {value!r}. Dozwolone: "
+            f"{', '.join(DEBTOR_TYPE_CHOICES)}.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+def _resolve_debtor_type(flag_value, json_value) -> DebtorType:
+    """Status dłużnika z flagi, a jeśli jej nie ma — z klucza w JSON-ie.
+
+    Fallback jak przy lawsuit_date, ale z jedną różnicą: przy SPRZECZNOŚCI obu
+    źródeł nie ma zwycięzcy, jest twardy stop. Skoro wartości się różnią, to co
+    najmniej jedna z nich deklaruje podmiot publiczny — a „flaga wygrywa"
+    znaczyłoby wtedy, że `--debtor-type private` na JSON-ie ze statusem
+    `public_medical` wystawia pełną kwotę po +10 p.p. Dokładnie to obejście
+    zakazuje komunikat bramki, więc CLI nie może go samo oferować. Rozstrzygnięcie,
+    które ze źródeł mówi prawdę o kwalifikacji z art. 4 pkt 3, jest oceną prawną
+    i nie należy do narzędzia.
+
+    Brak wartości → PRIVATE plus ostrzeżenie na stderr. Świadome odstępstwo od
+    toru A (tplegal-tools), gdzie brak jest twardym stopem: tam prawdę podaje
+    kolumna debtor_entities.debtor_type, a tutaj nie ma jej skąd wziąć, więc
+    stop unieważniłby każdy istniejący JSON, nie dając w zamian żadnej wiedzy.
+    """
+    flag = flag_value.strip() if isinstance(flag_value, str) else flag_value
+    from_json = json_value.strip() if isinstance(json_value, str) else json_value
+
+    flag_type = _parse_debtor_type(flag, "flaga --debtor-type") if flag else None
+    json_type = (
+        _parse_debtor_type(from_json, 'klucz "debtor_type" w JSON-ie')
+        if from_json
+        else None
+    )
+
+    if flag_type and json_type and flag_type != json_type:
+        print(
+            f"⛔ Sprzeczny status dłużnika: flaga --debtor-type={flag_type.value} "
+            f'vs "debtor_type": "{json_type.value}" w JSON-ie. Skoro wartości się '
+            "różnią, co najmniej jedna deklaruje podmiot publiczny — a która mówi "
+            "prawdę o kwalifikacji z art. 4 pkt 3, jest oceną prawną, nie wyborem "
+            "narzędzia.",
+            file=sys.stderr,
+        )
+        print(
+            "   Zostaw JEDNO źródło: popraw wartość w JSON-ie albo pomiń flagę.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    resolved = flag_type or json_type
+    if resolved is None:
+        print(NO_DEBTOR_TYPE_WARNING, file=sys.stderr)
+        return DebtorType.PRIVATE
+    return resolved
 
 
 def main():
@@ -64,6 +187,17 @@ def main():
         type=str,
         default=None,
         help="Data pozwu (YYYY-MM-DD) — do filtra przedawnienia",
+    )
+    parser.add_argument(
+        "--debtor-type", "-d",
+        type=str,
+        choices=DEBTOR_TYPE_CHOICES,
+        default=None,
+        help=(
+            "Status dłużnika wg art. 4 pkt 3 ustawy z 8.03.2013. Brak wartości = "
+            "private (z ostrzeżeniem na stderr). Wartości publiczne są dziś "
+            "ZABLOKOWANE — reżim art. 8 jest niekompletny"
+        ),
     )
 
     args = parser.parse_args()
@@ -140,8 +274,26 @@ def main():
             print(f"ERROR: Invalid lawsuit_date: {lawsuit_date_str}", file=sys.stderr)
             sys.exit(1)
 
-    # Kalkulacja
-    result = calculate_batch(invoices, lawsuit_date=lawsuit_date)
+    _require_readable_debtor_type_keys(raw)
+    debtor_type = _resolve_debtor_type(args.debtor_type, raw.get(DEBTOR_TYPE_KEY))
+
+    # Kalkulacja. NotImplementedError podnosi bramka reżimu art. 8 w calc.py
+    # (_require_implemented_debtor_type) — CLI jej nie duplikuje, tylko zamienia
+    # traceback na komunikat, z którego widać, co dalej.
+    try:
+        result = calculate_batch(
+            invoices, lawsuit_date=lawsuit_date, debtor_type=debtor_type
+        )
+    except NotImplementedError as e:
+        print(f"⛔ Dłużnik publiczny ({debtor_type.value}): {e}", file=sys.stderr)
+        print(
+            "   Nie licz odsetek ręcznie i NIE zmieniaj statusu na 'private', "
+            "żeby obejść blokadę — kwota policzona bez limitu terminu z art. 8 "
+            "ust. 2/4a byłaby zawyżona, a pismo powoływałoby art. 7 zamiast "
+            "art. 8 ust. 1. Zgłoś sprawę radcy.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     # Output JSON
     print(json.dumps(result, cls=_DecimalEncoder, indent=2, ensure_ascii=False))

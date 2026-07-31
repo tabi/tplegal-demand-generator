@@ -256,6 +256,165 @@ class TestPrincipalSupport:
 
 
 # ---------------------------------------------------------------------------
+# Status dłużnika — bramka reżimu art. 8 w generatorze pisma
+# ---------------------------------------------------------------------------
+
+class TestDebtorTypeGate:
+    """Do wersji 0.4.0 generator CZYTAŁ debtor_type tylko dla {{PODSTAWA_ODSETEK}}.
+
+    Skutek: JSON z "debtor_type": "public_medical" dawał pismo powołujące art. 8
+    ust. 1 przy kwocie policzonej po stawce z art. 7 — wezwanie przedsądowe
+    sprzeczne samo z sobą. Kwot dla podmiotu publicznego kalkulator policzyć nie
+    umie (brak limitu terminu z art. 8 ust. 2/4a), więc pismo ma nie powstać.
+    """
+
+    @pytest.fixture
+    def template_z_podstawa(self, tmp_path):
+        """Template z placeholderem podstawy prawnej odsetek."""
+        template_path = tmp_path / "template_podstawa.docx"
+        doc_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:body>
+<w:p><w:r><w:t>{{DLUZNIK_NAZWA}}</w:t></w:r></w:p>
+<w:p><w:r><w:t>{{KWOTA_ODSETKI_PLN}}</w:t></w:r></w:p>
+<w:p><w:r><w:t>{{PODSTAWA_ODSETEK}}</w:t></w:r></w:p>
+<w:p><w:r><w:t>{{LISTA_FAKTUR}}</w:t></w:r></w:p>
+</w:body>
+</w:document>"""
+        with zipfile.ZipFile(template_path, "w") as zf:
+            zf.writestr("word/document.xml", doc_xml.encode("utf-8"))
+            zf.writestr(
+                "[Content_Types].xml",
+                '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/'
+                'package/2006/content-types"></Types>',
+            )
+        return template_path
+
+    @pytest.mark.parametrize("value", ["public_non_medical", "public_medical"])
+    def test_publiczny_odmawia_wygenerowania(self, mock_template, sample_data, tmp_path, value):
+        sample_data["debtor_type"] = value
+        output = tmp_path / "output.docx"
+        with pytest.raises(ValueError, match="Dłużnik publiczny"):
+            fill_template_from_dict(mock_template, output, sample_data)
+        assert not output.exists(), "pismo dla dłużnika publicznego nie ma powstać"
+
+    def test_komunikat_zamyka_obejscie(self, mock_template, sample_data, tmp_path):
+        """Odmowa musi mówić, czego NIE robić — inaczej ktoś wpisze 'private'."""
+        sample_data["debtor_type"] = "public_medical"
+        output = tmp_path / "output.docx"
+        with pytest.raises(ValueError) as exc:
+            fill_template_from_dict(mock_template, output, sample_data)
+        msg = str(exc.value)
+        assert "art. 8 ust. 1" in msg
+        assert "art. 8 ust. 2/4a" in msg
+        assert "'private'" in msg
+
+    def test_nieznana_wartosc_odmawia(self, mock_template, sample_data, tmp_path):
+        sample_data["debtor_type"] = "szpital"
+        output = tmp_path / "output.docx"
+        with pytest.raises(ValueError, match="nieznana wartość debtor_type"):
+            fill_template_from_dict(mock_template, output, sample_data)
+
+    def test_bramka_przed_brakami_pol(self, mock_template, tmp_path):
+        """Publiczny dłużnik zatrzymuje pismo także przy niekompletnych danych."""
+        output = tmp_path / "output.docx"
+        with pytest.raises(ValueError, match="Dłużnik publiczny"):
+            fill_template_from_dict(
+                mock_template, output, {"debtor_type": "public_medical"}
+            )
+
+    def test_private_generuje_i_powoluje_art_7(self, template_z_podstawa, sample_data, tmp_path):
+        sample_data["debtor_type"] = "private"
+        output = tmp_path / "output.docx"
+        fill_template_from_dict(template_z_podstawa, output, sample_data)
+        with zipfile.ZipFile(output, "r") as zf:
+            content = zf.read("word/document.xml").decode("utf-8")
+        assert "art. 7 ust. 1 powołanej ustawy" in content
+        assert "art. 8" not in content
+
+    def test_brak_klucza_generuje_art_7(self, template_z_podstawa, sample_data, tmp_path):
+        """Brak statusu = prywatny, tak jak w kalkulatorze."""
+        assert "debtor_type" not in sample_data
+        output = tmp_path / "output.docx"
+        fill_template_from_dict(template_z_podstawa, output, sample_data)
+        with zipfile.ZipFile(output, "r") as zf:
+            content = zf.read("word/document.xml").decode("utf-8")
+        assert "art. 7 ust. 1 powołanej ustawy" in content
+
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_pusty_status_to_brak_statusu_a_nie_crash(
+        self, template_z_podstawa, sample_data, tmp_path, blank
+    ):
+        """Bramka i treść pisma muszą czytać pustą wartość tak samo.
+
+        Wcześniej bramka uznawała `""` za brak statusu i przepuszczała, a potem
+        podstawa_odsetek() wywalała ValueError z wnętrza enuma — pismo umierało
+        na wartości, którą ten sam kod przed chwilą uznał za nieistniejącą.
+        """
+        sample_data["debtor_type"] = blank
+        output = tmp_path / "output.docx"
+        fill_template_from_dict(template_z_podstawa, output, sample_data)
+        with zipfile.ZipFile(output, "r") as zf:
+            content = zf.read("word/document.xml").decode("utf-8")
+        assert "art. 7 ust. 1 powołanej ustawy" in content
+
+    @pytest.mark.parametrize("key", ["debtorType", "debtor-type", "DEBTOR_TYPE"])
+    def test_status_pod_nieczytanym_kluczem_odmawia(
+        self, mock_template, sample_data, tmp_path, key
+    ):
+        """Status podany pod inną nazwą klucza zniknąłby bez śladu z pisma."""
+        sample_data[key] = "public_medical"
+        output = tmp_path / "output.docx"
+        with pytest.raises(ValueError, match="nieczytanym kluczem"):
+            fill_template_from_dict(mock_template, output, sample_data)
+        assert not output.exists()
+
+    def test_brak_statusu_ostrzega_na_stderr(
+        self, template_z_podstawa, sample_data, tmp_path, capsys
+    ):
+        """Pismo powstaje, ale nie w ciszy — bliźniak ostrzeżenia z kalkulatora."""
+        output = tmp_path / "output.docx"
+        fill_template_from_dict(template_z_podstawa, output, sample_data)
+        err = capsys.readouterr().err
+        assert 'brak "debtor_type"' in err
+        assert "art. 7 ust. 1" in err
+
+    def test_podany_private_nie_ostrzega(
+        self, template_z_podstawa, sample_data, tmp_path, capsys
+    ):
+        sample_data["debtor_type"] = "private"
+        output = tmp_path / "output.docx"
+        fill_template_from_dict(template_z_podstawa, output, sample_data)
+        assert 'brak "debtor_type"' not in capsys.readouterr().err
+
+    def test_cli_generate_demand_konczy_bledem(
+        self, mock_template, sample_data, tmp_path, monkeypatch, capsys
+    ):
+        """Ścieżka pracownika: `generate-demand` wychodzi z kodem 1, bez pliku."""
+        from demand_generator.generator import main
+
+        sample_data["debtor_type"] = "public_medical"
+        json_file = tmp_path / "demand_input.json"
+        json_file.write_text(
+            json.dumps(sample_data | {"invoice_tiers": sorted(sample_data["invoice_tiers"])}),
+            encoding="utf-8",
+        )
+        output = tmp_path / "wezwanie.docx"
+        monkeypatch.setattr("sys.argv", [
+            "generate-demand",
+            "--json", str(json_file),
+            "--template", str(mock_template),
+            "--output", str(output),
+        ])
+
+        with pytest.raises(SystemExit) as exc:
+            main()
+        assert exc.value.code == 1
+        assert "Dłużnik publiczny" in capsys.readouterr().err
+        assert not output.exists()
+
+
+# ---------------------------------------------------------------------------
 # DEFAULT_TEMPLATE
 # ---------------------------------------------------------------------------
 

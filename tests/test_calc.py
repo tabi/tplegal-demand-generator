@@ -848,3 +848,262 @@ class TestCalculateBatchCivilInterest:
             result["total_compensation_pln"] + result["total_interest_pln"]
         )
         assert result["total_civil_interest_pln"] > Decimal("0")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# STATUS DŁUŻNIKA W CLI (calc_cli) — ścieżka, którą realnie chodzi pracownik
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestDebtorTypeCli:
+    """Do wersji 0.4.0 CLI statusu dłużnika NIE przyjmowało.
+
+    Skutek: `calculate_batch` dostawał domyślne PRIVATE, więc publiczny szpital
+    liczył się po stawce +10 p.p. (13,75% w H2 2026) zamiast +8 p.p. (11,75%),
+    a bramka reżimu art. 8 w calc.py była z linii komend nieosiągalna. Te testy
+    stoją na stawce widocznej w podokresach wyniku, bo to jedyna liczba, po
+    której da się rozpoznać, którą kolumnę tabeli wzięto.
+
+    Wywołanie idzie w procesie, nie subprocessem: conftest blokuje gniazda tylko
+    w bieżącym procesie, a kurs NBP jest tu zamockowany.
+    """
+
+    JSON_MINIMAL = {
+        "invoices": [{
+            "invoice_number": "FV/2026/001",
+            "gross": 100000,
+            "due_date": "2026-01-12",
+            "payment_date": "2026-07-20",
+        }]
+    }
+
+    def _run(self, tmp_path, monkeypatch, capsys, argv=(), json_extra=None):
+        """Uruchamia calc_cli.main() i zwraca (exit_code, stdout, stderr)."""
+        import demand_generator.calc_cli as calc_cli
+
+        payload = dict(self.JSON_MINIMAL)
+        if json_extra:
+            payload.update(json_extra)
+        json_file = tmp_path / "invoices.json"
+        json_file.write_text(json.dumps(payload), encoding="utf-8")
+
+        monkeypatch.setattr(
+            "demand_generator.calc.get_nbp_eur_rate", lambda d: Decimal("4.2267")
+        )
+        monkeypatch.setattr(
+            "sys.argv",
+            ["calc-rekompensa", "--json", str(json_file), *argv],
+        )
+
+        exit_code = 0
+        try:
+            calc_cli.main()
+        except SystemExit as e:
+            exit_code = e.code if e.code is not None else 0
+
+        captured = capsys.readouterr()
+        return exit_code, captured.out, captured.err
+
+    @staticmethod
+    def _rates(stdout: str) -> list[float]:
+        """Stawki z podokresów wyniku — po nich poznaje się wybraną kolumnę."""
+        result = json.loads(stdout)
+        return [
+            p["rate"]
+            for inv in result["invoices"]
+            for p in inv["interest_detailed"]["periods"]
+        ]
+
+    def test_brak_statusu_liczy_prywatnie_i_ostrzega(self, tmp_path, monkeypatch, capsys):
+        """Brak wartości = private, ale GŁOŚNO — cisza była przyczyną defektu."""
+        code, out, err = self._run(tmp_path, monkeypatch, capsys)
+        assert code == 0
+        assert "nie podano statusu dłużnika" in err
+        assert "PRYWATNEGO" in err
+        assert "+10 p.p." in err
+        # Ostrzeżenie NIE trafia do stdout — tam idzie JSON dla generatora.
+        assert json.loads(out)["invoice_count"] == 1
+        assert 13.75 in self._rates(out)
+
+    def test_flaga_private_nie_ostrzega(self, tmp_path, monkeypatch, capsys):
+        code, out, err = self._run(tmp_path, monkeypatch, capsys, argv=["--debtor-type", "private"])
+        assert code == 0
+        assert "nie podano statusu dłużnika" not in err
+        assert 13.75 in self._rates(out)
+
+    def test_klucz_json_dziala_jak_flaga(self, tmp_path, monkeypatch, capsys):
+        """Fallback na klucz w JSON-ie — wzorem lawsuit_date."""
+        code, out, err = self._run(
+            tmp_path, monkeypatch, capsys, json_extra={"debtor_type": "private"}
+        )
+        assert code == 0
+        assert "nie podano statusu dłużnika" not in err
+        assert 13.75 in self._rates(out)
+
+    @pytest.mark.parametrize("value", ["public_non_medical", "public_medical"])
+    def test_flaga_publiczna_to_twardy_stop(self, tmp_path, monkeypatch, capsys, value):
+        """Bramka reżimu art. 8 osiągalna z CLI: komunikat + exit 1, zero JSON-a."""
+        code, out, err = self._run(tmp_path, monkeypatch, capsys, argv=["--debtor-type", value])
+        assert code == 1
+        assert out == ""            # żadnej kwoty nie wystawiamy
+        assert "⛔" in err
+        assert value in err
+        assert "art. 8 ust. 2/4a" in err
+        assert "doręczenia" in err
+        # Komunikat musi zamykać obejście, nie tylko zgłaszać blokadę.
+        assert "'private'" in err
+
+    @pytest.mark.parametrize("value", ["public_non_medical", "public_medical"])
+    def test_klucz_json_publiczny_to_twardy_stop(self, tmp_path, monkeypatch, capsys, value):
+        """Ten sam stop, gdy status siedzi w JSON-ie, a nie we flagach."""
+        code, out, err = self._run(
+            tmp_path, monkeypatch, capsys, json_extra={"debtor_type": value}
+        )
+        assert code == 1
+        assert out == ""
+        assert "⛔" in err
+
+    @pytest.mark.parametrize(
+        "flag,in_json",
+        [
+            # Kierunek groźny: flaga „private" na JSON-ie ze statusem publicznym
+            # policzyłaby pełną kwotę po +10 p.p. — dokładnie to obejście, którego
+            # zakazuje komunikat bramki.
+            ("private", "public_medical"),
+            ("public_medical", "private"),
+            ("public_medical", "public_non_medical"),
+        ],
+    )
+    def test_sprzecznosc_flagi_i_jsona_to_twardy_stop(
+        self, tmp_path, monkeypatch, capsys, flag, in_json
+    ):
+        """Różne wartości = co najmniej jedna publiczna. Narzędzie nie wybiera."""
+        code, out, err = self._run(
+            tmp_path, monkeypatch, capsys,
+            argv=["--debtor-type", flag],
+            json_extra={"debtor_type": in_json},
+        )
+        assert code == 1
+        assert out == "", "przy sprzecznym statusie nie wystawiamy żadnej kwoty"
+        assert "Sprzeczny status dłużnika" in err
+        assert flag in err and in_json in err
+
+    def test_zgodna_flaga_i_json_liczy_normalnie(self, tmp_path, monkeypatch, capsys):
+        """Ta sama wartość w obu źródłach to nie sprzeczność."""
+        code, out, err = self._run(
+            tmp_path, monkeypatch, capsys,
+            argv=["--debtor-type", "private"],
+            json_extra={"debtor_type": "private"},
+        )
+        assert code == 0
+        assert "Sprzeczny status" not in err
+        assert 13.75 in self._rates(out)
+
+    def test_nieznana_wartosc_w_jsonie_to_blad(self, tmp_path, monkeypatch, capsys):
+        """Literówka w statusie prawnym nie ma prawa cicho zejść na private."""
+        code, out, err = self._run(
+            tmp_path, monkeypatch, capsys, json_extra={"debtor_type": "publiczny"}
+        )
+        assert code == 1
+        assert out == ""
+        assert "nieznany debtor_type" in err
+        assert "public_medical" in err   # komunikat wylicza dozwolone wartości
+
+    def test_nieznana_wartosc_w_jsonie_nie_daje_sie_przykryc_flaga(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """`publiczny` to literówka znacząca ODWROTNOŚĆ wartości domyślnej.
+
+        Gdyby flaga po prostu wygrywała, nieodczytany status prawny zostałby
+        cicho wyrzucony do kosza.
+        """
+        code, out, err = self._run(
+            tmp_path, monkeypatch, capsys,
+            argv=["--debtor-type", "private"],
+            json_extra={"debtor_type": "publiczny"},
+        )
+        assert code == 1
+        assert out == ""
+        assert "nieznany debtor_type" in err
+        assert 'klucz "debtor_type" w JSON-ie' in err
+
+    def test_nieznana_wartosc_flagi_odrzuca_argparse(self, tmp_path, monkeypatch, capsys):
+        """Flaga jest zamknięta na trzy wartości enuma."""
+        code, out, err = self._run(
+            tmp_path, monkeypatch, capsys, argv=["--debtor-type", "szpital"]
+        )
+        assert code == 2            # argparse: invalid choice
+        assert out == ""
+
+    def test_puste_wartosci_traktowane_jak_brak(self, tmp_path, monkeypatch, capsys):
+        """Pusty string w JSON-ie to brak statusu, nie błąd — z ostrzeżeniem."""
+        code, out, err = self._run(
+            tmp_path, monkeypatch, capsys, json_extra={"debtor_type": "  "}
+        )
+        assert code == 0
+        assert "nie podano statusu dłużnika" in err
+        assert 13.75 in self._rates(out)
+
+    @pytest.mark.parametrize(
+        "key",
+        ["debtorType", "debtor-type", "DEBTOR_TYPE", "debtor_type ", "debtortype"],
+    )
+    def test_status_pod_nieczytanym_kluczem_to_blad(
+        self, tmp_path, monkeypatch, capsys, key
+    ):
+        """Model budujący JSON pisze `debtorType`. Cichy no-op byłby najgorszy.
+
+        Kwalifikacja z art. 4 pkt 3 PODANA i zignorowana wygląda jak sukces —
+        gorzej niż jej brak, który dostaje ostrzeżenie.
+        """
+        code, out, err = self._run(
+            tmp_path, monkeypatch, capsys, json_extra={key: "public_medical"}
+        )
+        assert code == 1
+        assert out == ""
+        assert "nieczytanym kluczem" in err
+        assert key in err
+
+    def test_status_w_zagniezdzeniu_to_blad(self, tmp_path, monkeypatch, capsys):
+        """`debtor_type` w pozycji faktury parsuje się bez błędu i jest ignorowany."""
+        json_file_payload = {
+            "invoices": [{
+                "invoice_number": "FV/2026/001",
+                "gross": 100000,
+                "due_date": "2026-01-12",
+                "payment_date": "2026-07-20",
+                "debtor_type": "public_medical",
+            }]
+        }
+        import demand_generator.calc_cli as calc_cli
+
+        json_file = tmp_path / "nested.json"
+        json_file.write_text(json.dumps(json_file_payload), encoding="utf-8")
+        monkeypatch.setattr(
+            "demand_generator.calc.get_nbp_eur_rate", lambda d: Decimal("4.2267")
+        )
+        monkeypatch.setattr("sys.argv", ["calc-rekompensa", "--json", str(json_file)])
+
+        with pytest.raises(SystemExit) as exc:
+            calc_cli.main()
+        captured = capsys.readouterr()
+        assert exc.value.code == 1
+        assert captured.out == ""
+        assert "zagnieżdżeniu" in captured.err
+        assert "public_medical" in captured.err
+
+    def test_poprawny_klucz_nie_jest_falszywym_alarmem(self, tmp_path, monkeypatch, capsys):
+        """Strażnik kluczy nie może blokować dokładnie tej nazwy, którą czytamy."""
+        code, out, err = self._run(
+            tmp_path, monkeypatch, capsys, json_extra={"debtor_type": "private"}
+        )
+        assert code == 0
+        assert "nieczytanym kluczem" not in err
+
+    def test_lawsuit_date_dalej_dziala(self, tmp_path, monkeypatch, capsys):
+        """Regresja: nowa flaga nie rozbija dotychczasowego parsowania."""
+        code, out, err = self._run(
+            tmp_path, monkeypatch, capsys,
+            argv=["--lawsuit-date", "2026-08-01", "--debtor-type", "private"],
+        )
+        assert code == 0
+        assert json.loads(out)["prescribed_count"] == 0
