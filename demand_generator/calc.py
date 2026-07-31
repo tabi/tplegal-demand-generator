@@ -14,7 +14,7 @@ Podstawa prawna:
 
 import warnings
 from datetime import date, timedelta
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_CEILING, ROUND_HALF_UP
 from enum import Enum
 from typing import Optional
 
@@ -609,8 +609,9 @@ def court_fee(wps: Decimal) -> Decimal:
         if wps <= threshold:
             return fee
 
-    # > 20000: 5% WPS, zaokrąglone w górę do pełnego złotego, max 200 000
-    fee = (wps * Decimal("0.05")).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    # > 20000: 5% WPS, zaokrąglone w górę do pełnego złotego (art. 21 u.k.s.c.),
+    # max 200 000
+    fee = (wps * Decimal("0.05")).quantize(Decimal("1"), rounding=ROUND_CEILING)
     return min(fee, Decimal("200000"))
 
 
