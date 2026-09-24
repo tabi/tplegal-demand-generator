@@ -26,6 +26,7 @@ from demand_generator.calc import DebtorType  # noqa: E402
 from demand_generator.utils import (  # noqa: E402
     DEBTOR_TYPE_KEY,
     find_misspelled_debtor_type_keys,
+    format_bank_account,
     normalize_entity_name,
 )
 
@@ -513,7 +514,7 @@ def _build_placeholders(data: dict, variant: dict, use_table: bool) -> dict[str,
         "{{KWOTA_REKOMPENSATY_PLN}}": format_pln(total_pln),
         "{{KWOTA_ODSETKI_PLN}}": format_pln(interest_pln),
         "{{KWOTA_ODSETKI_KC_PLN}}": format_pln(civil_interest_pln),
-        "{{NUMER_RACHUNKU}}": data.get("cr_bank", "___"),
+        "{{NUMER_RACHUNKU}}": format_bank_account(data.get("cr_bank")),
         "{{TERMIN_DNI}}": str(variant["deadline_days"]),
         "{{PODSTAWA_ODSETEK}}": podstawa_odsetek(data.get("debtor_type")),
     }

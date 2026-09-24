@@ -40,7 +40,7 @@ pip install git+https://github.com/tabi/tplegal-demand-generator.git requests ho
 calc-rekompensa --version
 ```
 
-Wersja musi być **co najmniej 0.8.0** (wpłaty częściowe). Niższa → powtórz
+Wersja musi być **co najmniej 0.8.1** (wpłaty częściowe, jeden format numeru rachunku). Niższa → powtórz
 instalację z `--force-reinstall` i sprawdź ponownie, zanim policzysz cokolwiek.
 
 Po instalacji masz komendy `calc-rekompensa` i `generate-demand`. Template DOCX
@@ -63,7 +63,7 @@ NIP-y aktywnie wyszukuj w czacie, fakturach, stopkach PDF, tabelach (10 cyfr,
 mogą być z myślnikami/spacjami). Z NIP-em generator sam pobierze z GUS REGON
 aktualną nazwę i adres na dzień wysyłki.
 
-Brak numeru rachunku → `"___"`. Brak NIP-u i brak ręcznej nazwy/adresu →
+Numer rachunku przepisz ze źródła w dowolnym zapisie (z „PL" lub bez, ze spacjami lub bez) — generator sam ujednolici go do formatu `NN NNNN NNNN NNNN NNNN NNNN NNNN` (bez „PL", jak w stopce kancelarii) i sprawdzi sumę kontrolną. Błąd sumy kontrolnej = bramka stopu nr 3: nie poprawiaj cyfr na oko, dopytaj użytkownika. Brak numeru rachunku → `"___"`. Brak NIP-u i brak ręcznej nazwy/adresu →
 dopytaj, zanim uruchomisz generator (inaczej w piśmie pojawi się
 **[BRAK DANYCH — UZUPEŁNIJ]**).
 
@@ -125,7 +125,7 @@ wynik bierzesz do wezwania. Usunięte faktury wymień użytkownikowi.
   "cr_nip": "6972377234",
   "creditor_name": "Firma ABC Sp. z o.o.",
   "cr_street": "ul. Skarbowa 2/5", "cr_city": "Leszno", "cr_zip": "64-100",
-  "cr_bank": "PL 12 3456 7890 1234 5678 9012 3456",
+  "cr_bank": "<numer rachunku wierzyciela ze źródła>",
   "d_nip": "7792528495",
   "debtor_name": "Dłużnik XYZ S.A.",
   "d_street": "ul. Poznańska 10", "d_city": "Poznań", "d_zip": "60-001",

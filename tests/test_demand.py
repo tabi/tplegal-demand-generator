@@ -76,7 +76,7 @@ def sample_data():
         "cr_street": "ul. Skarbowa 2/5",
         "cr_city": "Leszno",
         "cr_zip": "64-100",
-        "cr_bank": "PL 12 3456 7890 1234 5678 9012 3456",
+        "cr_bank": "PL 60 1140 2004 0000 3802 7707 5123",  # poprawna suma kontrolna (IBAN mod 97)
         "debtor_name": "DŁUŻNIK XYZ S.A.",
         "d_street": "ul. Poznańska 10",
         "d_city": "Poznań",
