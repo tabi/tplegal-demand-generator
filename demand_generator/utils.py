@@ -77,6 +77,40 @@ def normalize_entity_name(name: str) -> str:
 DEBTOR_TYPE_KEY = "debtor_type"
 
 
+BANK_ACCOUNT_PLACEHOLDER = "___"
+
+
+def format_bank_account(raw) -> str:
+    """Numer rachunku do pisma: zawsze bez „PL", grupy 2+4×6, suma kontrolna sprawdzona.
+
+    Format jak w stopce kancelarii („60 1140 2004 0000 3802 7707 5123"), żeby
+    pismo nie miało dwóch zapisów rachunku. Brak numeru → placeholder do
+    uzupełnienia w Wordzie. Numer z błędną sumą kontrolną (IBAN mod 97,
+    ISO 13616) → ValueError: literówka kieruje wpłatę dłużnika na zły rachunek.
+    Tylko rachunki polskie (26 cyfr NRB) — zagraniczny IBAN też jest błędem.
+    """
+    if raw is None:
+        return BANK_ACCOUNT_PLACEHOLDER
+    compact = re.sub(r"[\s\-]", "", str(raw)).upper()
+    if not compact or set(compact) == {"_"}:
+        return BANK_ACCOUNT_PLACEHOLDER
+    if compact.startswith("PL"):
+        compact = compact[2:]
+    if not re.fullmatch(r"\d{26}", compact):
+        raise ValueError(
+            f"nieprawidłowy numer rachunku {raw!r}: oczekiwane 26 cyfr polskiego "
+            "rachunku (NRB), opcjonalnie z prefiksem PL. Rachunek zagraniczny "
+            "wpisz ręcznie w Wordzie."
+        )
+    # IBAN mod 97: 4 znaki z przodu (PL + cyfry kontrolne) na koniec, PL → 2521.
+    if int(compact[2:] + "2521" + compact[:2]) % 97 != 1:
+        raise ValueError(
+            f"numer rachunku {raw!r} ma błędną sumę kontrolną — literówka albo "
+            "przestawione cyfry. Sprawdź numer u źródła (faktura, umowa)."
+        )
+    return compact[:2] + " " + " ".join(compact[i:i + 4] for i in range(2, 26, 4))
+
+
 def _normalized_key(key: str) -> str:
     """Klucz bez znaków nieliterowych, małymi literami: 'debtorType' -> 'debtortype'."""
     return re.sub(r"[^a-z0-9]", "", key.lower())
