@@ -167,6 +167,28 @@ def _resolve_debtor_type(flag_value, json_value) -> DebtorType:
     return resolved
 
 
+def _parse_payments(raw_payments, i: int) -> list[dict]:
+    """Lista wpłat częściowych z JSON-a → [{"date": date, "amount": Decimal}]."""
+    if not isinstance(raw_payments, list):
+        print(f"ERROR: Invoice #{i+1}: payments musi być listą", file=sys.stderr)
+        sys.exit(1)
+    payments = []
+    for p in raw_payments:
+        try:
+            payments.append({
+                "date": date.fromisoformat(p["date"]),
+                "amount": Decimal(str(p["amount"])),
+            })
+        except (KeyError, ValueError, TypeError, ArithmeticError):
+            print(
+                f"ERROR: Invoice #{i+1} invalid payment: {p!r} "
+                '(oczekiwane {"date": "RRRR-MM-DD", "amount": kwota})',
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    return payments
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Kalkulator rekompensat i odsetek handlowych — Rekompensa.pl"
@@ -240,10 +262,24 @@ def main():
             print(f"ERROR: Invoice #{i+1} invalid due_date: {inv['due_date']}", file=sys.stderr)
             sys.exit(1)
 
-        # payment_date opcjonalny — domyślnie today (faktura niezapłacona)
+        # payment_date = zapłata CAŁOŚCI; payments = wpłaty częściowe. Oba naraz
+        # to dwa źródła prawdy o zapłacie — nie zgadujemy, które jest dobre.
         raw_payment = inv.get("payment_date")
+        raw_payments = inv.get("payments")
+        payments = None
+        if raw_payments is not None and raw_payment is not None:
+            print(
+                f"ERROR: Invoice #{i+1}: podano i payment_date, i payments. "
+                "payment_date = zapłata całości jednego dnia, payments = wpłaty "
+                "częściowe — zostaw jedno.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         if raw_payment is None:
+            # Faktura niezapłacona albo zapłacona częściowo: reszta niesie
+            # odsetki do dziś i jest należnością główną.
             payment_date = date.today()
+            payments = _parse_payments(raw_payments or [], i)
         else:
             try:
                 payment_date = date.fromisoformat(raw_payment)
@@ -262,6 +298,7 @@ def main():
             "gross": gross,
             "due_date": due_date,
             "payment_date": payment_date,
+            "payments": payments,
         })
 
     # Parsuj lawsuit_date
@@ -293,6 +330,11 @@ def main():
             "art. 8 ust. 1. Zgłoś sprawę radcy.",
             file=sys.stderr,
         )
+        sys.exit(1)
+    except ValueError as e:
+        # Wpłaty niespójne z fakturą (nadpłata, kwota ≤ 0) — nie ma bezpiecznej
+        # kwoty do wezwania, więc bez wyniku na stdout.
+        print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
 
     # Output JSON

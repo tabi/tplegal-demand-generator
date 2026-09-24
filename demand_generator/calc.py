@@ -669,6 +669,41 @@ def legal_representation_cost(wps: Decimal) -> Decimal:
 # KALKULACJA ŁĄCZNA PER FAKTURA
 # ═══════════════════════════════════════════════════════════════════════
 
+def _payment_tranches(
+    gross: Decimal,
+    payment_date: date,
+    payments: Optional[list[dict]],
+) -> tuple[list[tuple[Decimal, date]], Decimal]:
+    """Transze naliczania odsetek: (kwota, dzień końca naliczania) + suma wpłat.
+
+    payments=None — stary kontrakt: całość zapłacona w payment_date.
+    payments=[...] — wpłaty częściowe (także pusta lista = nic nie wpłacono);
+    każda niesie odsetki od swojej kwoty do swojej daty, niespłacona reszta
+    do payment_date (dla faktury niezapłaconej: dzień naliczania). To daje
+    odsetki od malejącego salda — wpłata zaliczana na należność główną.
+    """
+    if payments is None:
+        return [(gross, payment_date)], gross
+
+    tranches = []
+    paid = Decimal("0")
+    for p in payments:
+        amount = Decimal(str(p["amount"]))
+        if amount <= 0:
+            raise ValueError(f"Wpłata musi być dodatnia, jest {amount} ({p['date']})")
+        tranches.append((amount, p["date"]))
+        paid += amount
+
+    if paid > gross:
+        raise ValueError(
+            f"Suma wpłat {paid} przekracza kwotę brutto faktury {gross} — "
+            "nadpłata albo wpłata przypisana do złej faktury"
+        )
+    if paid < gross:
+        tranches.append((gross - paid, payment_date))
+    return tranches, paid
+
+
 def calculate_invoice(
     gross: Decimal,
     due_date: date,
@@ -676,6 +711,7 @@ def calculate_invoice(
     lawsuit_date: Optional[date] = None,
     cutoff_date: Optional[date] = None,
     debtor_type: DebtorType = DebtorType.PRIVATE,
+    payments: Optional[list[dict]] = None,
 ) -> dict:
     """
     Pełna kalkulacja dla jednej faktury: rekompensata + odsetki handlowe
@@ -691,26 +727,36 @@ def calculate_invoice(
         cutoff_date: dzień do którego liczymy odsetki KC od rekompensaty
             (None = date.today())
         debtor_type: status dłużnika; != PRIVATE podnosi NotImplementedError
+        payments: wpłaty częściowe [{"date": date, "amount": Decimal}, ...].
+            None = całość zapłacona w payment_date (stary kontrakt). Lista
+            (także pusta) = niespłacona reszta niesie odsetki do payment_date.
+            Rekompensata zostaje JEDNA, z progu pełnej kwoty brutto.
 
     Returns:
         {
             "compensation": {...},          # z calculate_compensation
             "interest": Decimal,            # kwota odsetek handlowych PLN (art. 7)
-            "interest_detailed": {...},     # z calculate_interest_detailed
+            "interest_detailed": {...},     # podokresy wszystkich transz
             "civil_interest": Decimal,      # odsetki KC od rekompensaty (art. 481 § 2)
             "total_pln": Decimal,           # compensation_pln + interest (BEZ civil_interest)
             "prescription_status": str,     # NIEPRZEDAWNIONE / CZESCIOWE / PRZEDAWNIONE
             "prescribed_days": int,
-            "delay_days": int,
+            "delay_days": int,              # do ostatniej wpłaty, a przy reszcie — do payment_date
+            "paid_pln": Decimal,            # suma wpłat
+            "outstanding_pln": Decimal,     # należność główna do zapłaty
         }
     """
     _require_implemented_debtor_type(debtor_type)
     due_date = compute_effective_due_date(due_date)
+    tranches, paid = _payment_tranches(gross, payment_date, payments)
+    last_day = max(end for _, end in tranches)
 
     result = {
-        "delay_days": max(0, (payment_date - due_date).days),
+        "delay_days": max(0, (last_day - due_date).days),
         "prescription_status": "NIEPRZEDAWNIONE",
         "prescribed_days": 0,
+        "paid_pln": paid,
+        "outstanding_pln": gross - paid,
     }
 
     # Rekompensata
@@ -734,20 +780,30 @@ def calculate_invoice(
     if lawsuit_date:
         earliest = find_earliest_non_prescribed_interest_date(interest_start, lawsuit_date)
         if earliest is None:
-            adjusted_start = payment_date + timedelta(days=1)  # force zero
+            adjusted_start = last_day + timedelta(days=1)  # force zero
         elif earliest > interest_start:
             adjusted_start = earliest
             result["prescription_status"] = "CZESCIOWE_PRZEDAWNIENIE"
             result["prescribed_days"] = (earliest - interest_start).days
 
-    result["interest_detailed"] = calculate_interest_detailed(
-        gross,
-        due_date,
-        payment_date,
-        interest_start_override=adjusted_start,
-        debtor_type=debtor_type,
-    )
-    result["interest"] = result["interest_detailed"]["total"]
+    # Każda transza liczona jak osobna zapłata swojej kwoty — suma zaokrąglonych
+    # podokresów, tak jak dotąd dla całej faktury (kanon ścieżki produkcyjnej).
+    detailed = {"total": Decimal("0"), "periods": [], "start_date": None, "end_date": None}
+    for amount, end in tranches:
+        part = calculate_interest_detailed(
+            amount,
+            due_date,
+            end,
+            interest_start_override=adjusted_start,
+            debtor_type=debtor_type,
+        )
+        detailed["total"] += part["total"]
+        detailed["periods"].extend({**p, "base": amount} for p in part["periods"])
+        if part["start_date"]:
+            detailed["start_date"] = part["start_date"]
+            detailed["end_date"] = max(filter(None, [detailed["end_date"], part["end_date"]]))
+    result["interest_detailed"] = detailed
+    result["interest"] = detailed["total"]
 
     # Odsetki KC od rekompensaty (art. 481 § 2) — od termin_efektywny+2 do cutoff.
     # UWAGA: civil_interest jest OSOBNYM polem. total_pln zachowuje starą
@@ -778,6 +834,7 @@ def calculate_batch(
               nakładana wewnątrz calculate_invoice)
             - payment_date (date): data zapłaty
             - invoice_number (str, optional): numer faktury
+            - payments (list, optional): wpłaty częściowe — patrz calculate_invoice
         lawsuit_date: planowana data pozwu
         cutoff_date: dzień naliczania odsetek KC od rekompensaty
             (None = date.today())
@@ -790,6 +847,7 @@ def calculate_batch(
             "total_compensation_pln": Decimal,
             "total_interest_pln": Decimal,          # odsetki handlowe (art. 7)
             "total_civil_interest_pln": Decimal,    # odsetki KC od rekompensaty (art. 481 § 2)
+            "total_outstanding_pln": Decimal,       # należność główna: brutto − wpłaty (bez przedawnionych)
             "total_claim_pln": Decimal,             # compensation + interest handlowe (BEZ civil)
             "wps": Decimal,
             "court_fee": Decimal,
@@ -807,6 +865,7 @@ def calculate_batch(
     total_comp_pln = Decimal("0")
     total_interest = Decimal("0")
     total_civil_interest = Decimal("0")
+    total_outstanding = Decimal("0")
     prescribed_count = 0
     partial_count = 0
     tiers = set()
@@ -819,12 +878,14 @@ def calculate_batch(
             lawsuit_date=lawsuit_date,
             cutoff_date=cutoff_date,
             debtor_type=debtor_type,
+            payments=inv.get("payments"),
         )
         calc["invoice_number"] = inv.get("invoice_number", "")
 
         if calc["prescription_status"] == "PRZEDAWNIONE":
             prescribed_count += 1
         else:
+            total_outstanding += calc["outstanding_pln"]
             total_comp_eur += calc["compensation"]["comp_eur"]
             total_comp_pln += calc["compensation"]["comp_pln"]
             total_interest += calc["interest"]
@@ -848,6 +909,7 @@ def calculate_batch(
         "total_compensation_pln": total_comp_pln.quantize(Decimal("0.01")),
         "total_interest_pln": total_interest.quantize(Decimal("0.01")),
         "total_civil_interest_pln": total_civil_interest.quantize(Decimal("0.01")),
+        "total_outstanding_pln": total_outstanding.quantize(Decimal("0.01")),
         "total_claim_pln": total_claim.quantize(Decimal("0.01")),
         "wps": wps.quantize(Decimal("0.01")),
         "court_fee": court_fee(wps),
