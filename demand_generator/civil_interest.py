@@ -106,7 +106,7 @@ def calculate_civil_interest(
 
     Args:
         amount_pln: kwota rekompensaty w PLN (baza naliczania)
-        start_date: dzien rozpoczecia naliczania (invoice_due_date + 1)
+        start_date: dzien rozpoczecia naliczania (calc.compensation_interest_start_date)
         end_date: dzien zakonczenia naliczania (cutoff_date, domyslnie today)
 
     Returns:

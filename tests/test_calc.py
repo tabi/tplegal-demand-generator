@@ -39,6 +39,7 @@ from demand_generator.calc import (
     calculate_invoice,
     calculate_batch,
     calculate_civil_interest_for_invoice,
+    compensation_interest_start_date,
 )
 
 
@@ -827,6 +828,36 @@ class TestCivilInterestForInvoice:
             Decimal("275"), future
         )
         assert result == Decimal("0")
+
+
+class TestCompensationInterestStart:
+    """Odsetki KC od rekompensaty biegną od dnia PO jej wymagalności.
+
+    Rekompensata przysługuje „od dnia nabycia uprawnienia do odsetek" (art. 10
+    ust. 1 u.p.n.o.t.h.), czyli od dnia po terminie płatności — tego samego dnia,
+    od którego biegną odsetki handlowe. Opóźnienie w zapłacie samej rekompensaty
+    (art. 481 § 1 KC) zaczyna się więc dzień później.
+    """
+
+    def test_dwa_dni_po_terminie_roboczym(self):
+        # termin 10.06.2026 (śr) → rekompensata 11.06 → odsetki KC od 12.06
+        assert compensation_interest_start_date(date(2026, 6, 10)) == date(2026, 6, 12)
+
+    def test_termin_w_sobote_przesuniety_art_115(self):
+        # 10.01.2026 (sob) → termin 12.01 (pon) → rekompensata 13.01 → odsetki 14.01
+        assert compensation_interest_start_date(date(2026, 1, 10)) == date(2026, 1, 14)
+
+    def test_zero_w_dniu_wymagalnosci_rekompensaty(self):
+        # cutoff 12.06 = okres [12.06, 12.06) — pusty, rekompensata dopiero wymagalna
+        assert calculate_civil_interest_for_invoice(
+            Decimal("1000"), date(2026, 6, 10), date(2026, 6, 12)
+        ) == Decimal("0")
+
+    def test_jeden_dzien_odsetek(self):
+        # [12.06, 13.06) = 1 dzień × 9,25% × 1000 / 365 = 0,2534 → 0,25
+        assert calculate_civil_interest_for_invoice(
+            Decimal("1000"), date(2026, 6, 10), date(2026, 6, 13)
+        ) == Decimal("0.25")
 
 
 class TestCalculateInvoiceCivilInterest:

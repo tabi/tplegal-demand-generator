@@ -489,6 +489,28 @@ def calculate_compensation(gross: Decimal, due_date: date) -> dict:
 # ODSETKI USTAWOWE OD REKOMPENSATY (art. 481 § 2 KC)
 # ═══════════════════════════════════════════════════════════════════════
 
+def compensation_interest_start_date(due_date: date) -> date:
+    """
+    Pierwszy dzień odsetek KC od rekompensaty: termin efektywny + 2 dni.
+
+    Rekompensata przysługuje „od dnia nabycia uprawnienia do odsetek" (art. 10
+    ust. 1 u.p.n.o.t.h.), czyli od dnia po terminie płatności — tego samego,
+    od którego biegną odsetki handlowe (art. 7 ust. 1). Tego dnia rekompensata
+    dopiero staje się wymagalna; opóźnienie w jej zapłacie (art. 481 § 1 KC)
+    zaczyna się dzień później.
+
+    VII Ga 377/25 (SO Białystok, 28.11.2025) wiąże wymagalność rekompensaty
+    z „chwilą popadnięcia przez dłużnika w opóźnienie z płatnością należności
+    głównej" — nie z samym terminem płatności. Wyrok NIE rozstrzyga, od którego
+    dnia biegną odsetki od rekompensaty (powódka liczyła je od dnia jej
+    wymagalności, sąd zasądził bez badania tego dnia) — ten start jest
+    konsekwencją art. 481 § 1 KC, nie cytatem z wyroku.
+
+    due_date surowa — korekta art. 115 KC nakładana wewnątrz.
+    """
+    return compute_effective_due_date(due_date) + timedelta(days=2)
+
+
 def calculate_civil_interest_for_invoice(
     compensation_pln: Decimal,
     due_date: date,
@@ -497,22 +519,21 @@ def calculate_civil_interest_for_invoice(
     """
     Thin wrapper na civil_interest.calculate_civil_interest.
     Liczy odsetki ustawowe za opóźnienie (art. 481 § 2 KC) od kwoty rekompensaty
-    za okres [due_date+1, cutoff_date).
+    za okres [termin_efektywny+2, cutoff_date) — start: patrz
+    compensation_interest_start_date.
 
-    Podstawa: wyrok SO Białystok VII Ga 377/25 z 28.11.2025 — rekompensata
-    art. 10 staje się wymagalna wraz z opóźnieniem w zapłacie należności
-    głównej, a od tej daty wierzycielowi przysługują odsetki ustawowe KC
-    (NIE handlowe art. 7 UPNOTH).
+    Odsetki ustawowe KC, NIE handlowe art. 7 UPNOTH (VII Ga 377/25 za
+    SO Rzeszów VI Ga 528/21).
 
     Args:
         compensation_pln: kwota rekompensaty PLN
-        due_date: termin płatności faktury SUROWY (dzień wymagalności
-            rekompensaty) — korekta art. 115 KC nakładana wewnątrz
+        due_date: termin płatności faktury SUROWY — korekta art. 115 KC
+            nakładana wewnątrz
         cutoff_date: dzień naliczania do (None → date.today())
 
     Returns:
-        Decimal('0') gdy compensation_pln == 0, due_date >= cutoff_date,
-        lub gdy due_date+1 jest przed zakresem tabeli CIVIL_INTEREST_RATES
+        Decimal('0') gdy compensation_pln == 0, start >= cutoff_date,
+        lub gdy start jest przed zakresem tabeli CIVIL_INTEREST_RATES
         (np. faktury sprzed 08.09.2022 — graceful fallback, bez raise).
     """
     from demand_generator.civil_interest import calculate_civil_interest
@@ -521,7 +542,7 @@ def calculate_civil_interest_for_invoice(
     try:
         return calculate_civil_interest(
             amount_pln=compensation_pln,
-            start_date=compute_effective_due_date(due_date) + timedelta(days=1),
+            start_date=compensation_interest_start_date(due_date),
             end_date=cutoff_date,
         )
     except ValueError:
@@ -728,7 +749,7 @@ def calculate_invoice(
     )
     result["interest"] = result["interest_detailed"]["total"]
 
-    # Odsetki KC od rekompensaty (art. 481 § 2) — liczone od due_date+1 do cutoff.
+    # Odsetki KC od rekompensaty (art. 481 § 2) — od termin_efektywny+2 do cutoff.
     # UWAGA: civil_interest jest OSOBNYM polem. total_pln zachowuje starą
     # semantykę (comp + interest handlowe) — żeby nie łamać existing callerów.
     # Sumę z odsetkami KC czytelnik robi sam: comp_pln + interest + civil_interest.
