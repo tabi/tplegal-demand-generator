@@ -284,15 +284,20 @@ def format_date_pl(d) -> str:
 # DOCX table generation — WordprocessingML XML
 # ---------------------------------------------------------------------------
 
+# Suma szerokości 9 000 twipów ≤ 9 066 (A4 minus marginesy 1 417 z wzoru pisma).
+# „Do zapłaty" od 0.8.2: przy wpłacie częściowej „Kwota brutto" to pełna kwota
+# faktury, więc bez tej kolumny suma tabeli nie zgadzała się ze świadczeniem
+# głównym z pkt 1 pisma (zgłoszenie z 25.09.2026).
 TABLE_COLUMNS = [
     ("Lp.", 450, "center"),
-    ("Nr faktury", 1500, "left"),
-    ("Kwota brutto", 1150, "right"),
-    ("Termin zapłaty", 1050, "center"),
-    ("Data zapłaty", 1050, "center"),
+    ("Nr faktury", 1150, "left"),
+    ("Kwota brutto", 1100, "right"),
+    ("Do zapłaty", 1100, "right"),
+    ("Termin zapłaty", 950, "center"),
+    ("Data zapłaty", 1100, "center"),
     ("Dni opóźnienia", 900, "center"),
-    ("Odsetki", 1100, "right"),
-    ("Rekompensata", 1100, "right"),
+    ("Odsetki", 1050, "right"),
+    ("Rekompensata", 1200, "right"),
 ]
 
 FONT_SIZE_HPS = "16"  # 8pt in half-points
@@ -332,18 +337,78 @@ def _tc(text: str, width: int, align="left", bold=False, shading=None):
     tc_pr += '<w:vAlign w:val="center"/></w:tcPr>'
 
     rpr = _cell_rpr(bold=bold)
-    escaped_text = _xml_escape(text)
+    # "\n" w tekście = złamanie wiersza w komórce (lista wpłat częściowych)
+    runs = '<w:br/>'.join(
+        f'<w:t xml:space="preserve">{_xml_escape(line)}</w:t>'
+        for line in text.split("\n")
+    )
 
     return (
         f'<w:tc>{tc_pr}'
         f'<w:p>{_cell_ppr(align)}'
-        f'<w:r>{rpr}<w:t xml:space="preserve">{escaped_text}</w:t></w:r>'
+        f'<w:r>{rpr}{runs}</w:r>'
         f'</w:p></w:tc>'
     )
 
 
 def _border_attr(tag):
     return f'<w:{tag} w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+
+
+def _outstanding(inv: dict) -> Decimal:
+    """Reszta do zapłaty z wiersza tabeli.
+
+    `outstanding_pln` z kalkulatora, gdy jest. Wiersz sprzed 0.8.2 go nie ma —
+    wtedy obowiązuje stary kontrakt: jest `payment_date` = zapłacona w całości
+    (0), brak = cała kwota brutto do zapłaty.
+    """
+    if inv.get("outstanding_pln") is not None:
+        return Decimal(str(inv["outstanding_pln"]))
+    if inv.get("payment_date"):
+        return Decimal("0")
+    return Decimal(str(inv.get("gross_amount", 0)))
+
+
+def _payment_cell(inv: dict) -> str:
+    """Treść kolumny „Data zapłaty".
+
+    Wpłaty częściowe (`payments`) wypisane są z datą i kwotą — inaczej faktura
+    wyglądała na niezapłaconą (samo „—"), a odsetki od spłaconej części nie
+    miały w tabeli żadnego oparcia. Jedna wpłata całości = sama data, jak dotąd.
+    """
+    payments = inv.get("payments") or []
+    partial = _outstanding(inv) > 0
+    if payments and (partial or len(payments) > 1):
+        lines = ["częściowo"] if partial else []
+        for p in sorted(payments, key=lambda p: str(p["date"])):
+            lines.append(f"{format_date_pl(p['date'])}\n{format_pln_zl(p['amount'])}")
+        return "\n".join(lines)
+    payment_date = inv.get("payment_date")
+    if payment_date:
+        return format_date_pl(payment_date)
+    if payments:
+        return format_date_pl(payments[-1]["date"])
+    return "\u2014"  # em dash for unpaid
+
+
+def _require_table_matches_principal(data: dict, invoices_detail: list[dict]) -> None:
+    """Suma kolumny „Do zapłaty" = świadczenie główne z pisma.
+
+    Sprawdzane tylko, gdy KAŻDY wiersz niesie `outstanding_pln` (kontrakt 0.8.2) —
+    wiersz bez pola liczy się starym kontraktem, a stare JSON-y mają działać
+    bez zmian. Rozjazd znaczy, że pola przepisano z wyniku kalkulatora z błędem,
+    a pismo byłoby wewnętrznie sprzeczne.
+    """
+    if not all(inv.get("outstanding_pln") is not None for inv in invoices_detail):
+        return
+    total = sum((_outstanding(inv) for inv in invoices_detail), Decimal("0"))
+    principal = _money_value(data, "total_principal_pln")
+    if total.quantize(Decimal("0.01")) != principal.quantize(Decimal("0.01")):
+        raise ValueError(
+            f"Suma kolumny „Do zapłaty” ({total}) ≠ total_principal_pln "
+            f"({principal}) — invoices_detail nie zgadza się z wynikiem "
+            "kalkulatora (outstanding_pln / total_outstanding_pln)"
+        )
 
 
 def build_invoice_table_xml(invoices_detail: list[dict]) -> str:
@@ -353,6 +418,8 @@ def build_invoice_table_xml(invoices_detail: list[dict]) -> str:
     Each item in invoices_detail:
         invoice_number, gross_amount, due_date, payment_date (or null),
         delay_days, interest_pln, compensation_pln
+        (od 0.8.2, opcjonalnie) outstanding_pln — reszta do zapłaty,
+        payments — [{"date", "amount"}] wpłaty częściowe
     """
     borders = ''.join(_border_attr(t) for t in
                       ['top', 'left', 'bottom', 'right', 'insideH', 'insideV'])
@@ -377,21 +444,16 @@ def build_invoice_table_xml(invoices_detail: list[dict]) -> str:
 
     data_rows = []
     for idx, inv in enumerate(invoices_detail, 1):
-        payment_date = inv.get("payment_date")
-        if payment_date:
-            payment_str = format_date_pl(payment_date)
-        else:
-            payment_str = "\u2014"  # em dash for unpaid
-
         cells = [
             _tc(str(idx), TABLE_COLUMNS[0][1], "center"),
             _tc(inv.get("invoice_number", ""), TABLE_COLUMNS[1][1], "center"),
             _tc(format_pln_zl(inv.get("gross_amount", 0)), TABLE_COLUMNS[2][1], "center"),
-            _tc(format_date_pl(inv["due_date"]), TABLE_COLUMNS[3][1], "center"),
-            _tc(payment_str, TABLE_COLUMNS[4][1], "center"),
-            _tc(str(inv.get("delay_days", 0)), TABLE_COLUMNS[5][1], "center"),
-            _tc(format_pln_zl(inv.get("interest_pln", 0)), TABLE_COLUMNS[6][1], "center"),
-            _tc(format_pln_zl(inv.get("compensation_pln", 0)), TABLE_COLUMNS[7][1], "center"),
+            _tc(format_pln_zl(_outstanding(inv)), TABLE_COLUMNS[3][1], "center"),
+            _tc(format_date_pl(inv["due_date"]), TABLE_COLUMNS[4][1], "center"),
+            _tc(_payment_cell(inv), TABLE_COLUMNS[5][1], "center"),
+            _tc(str(inv.get("delay_days", 0)), TABLE_COLUMNS[6][1], "center"),
+            _tc(format_pln_zl(inv.get("interest_pln", 0)), TABLE_COLUMNS[7][1], "center"),
+            _tc(format_pln_zl(inv.get("compensation_pln", 0)), TABLE_COLUMNS[8][1], "center"),
         ]
         data_rows.append(f'<w:tr>{"".join(cells)}</w:tr>')
 
@@ -565,6 +627,8 @@ def _apply_strategy_variant(content: bytes, strategy: str, variant: dict) -> byt
 
 def _render_document_xml(content: bytes, data: dict, strategy: str, variant: dict) -> bytes:
     invoices_detail = data.get("invoices_detail")
+    if invoices_detail:
+        _require_table_matches_principal(data, invoices_detail)
     placeholders = _build_placeholders(data, variant, use_table=bool(invoices_detail))
 
     content = _replace_placeholders(content, placeholders)
