@@ -57,10 +57,28 @@ def _data(principal=440000.00):
 
 
 def _rows(xml: str) -> list[list[str]]:
+    """Teksty komórek wiersz po wierszu; pusta komórka scalona w pionie pomijana."""
     return [
-        re.findall(r"<w:t[^>]*>([^<]*)</w:t>", tr)
+        [t for t in re.findall(r"<w:t[^>]*>([^<]*)</w:t>", tr) if t]
         for tr in re.findall(r"<w:tr>.*?</w:tr>", xml, flags=re.S)
     ]
+
+
+def _tr_xml(xml: str) -> list[str]:
+    return re.findall(r"<w:tr>.*?</w:tr>", xml, flags=re.S)
+
+
+def _blocks(xml: str) -> list[list[str]]:
+    """Wiersze danych zgrupowane per faktura (od 0.8.3 faktura z wpłatami
+    zajmuje kilka wierszy; kolejne mają komórki faktury scalone w pionie)."""
+    blocks: list[list[str]] = []
+    for tr, texts in zip(_tr_xml(xml)[1:], _rows(xml)[1:]):
+        first_cell = re.search(r"<w:tc>.*?</w:tc>", tr, flags=re.S).group(0)
+        if "<w:vMerge/>" in first_cell:
+            blocks[-1].extend(texts)
+        else:
+            blocks.append(list(texts))
+    return blocks
 
 
 class TestKolumnaDoZaplaty:
@@ -69,14 +87,14 @@ class TestKolumnaDoZaplaty:
         assert header[2:4] == ["Kwota brutto", "Do zapłaty"]
 
     def test_wiersz_czesciowy_pokazuje_brutto_reszte_i_wplate(self):
-        fv = next(r for r in _rows(build_invoice_table_xml(_detail())) if "FV/2026/B" in r)
+        fv = next(b for b in _blocks(build_invoice_table_xml(_detail())) if "FV/2026/B" in b)
         assert _zl("300 000,00") in fv
         assert _zl("90 000,00") in fv
         assert "częściowo" in fv and "26.07.2026" in fv and _zl("210 000,00") in fv
         assert "—" not in fv
 
     def test_suma_kolumny_do_zaplaty_rowna_swiadczeniu_glownemu(self):
-        rows = _rows(build_invoice_table_xml(_detail()))[1:]
+        rows = _blocks(build_invoice_table_xml(_detail()))
         suma = sum(float(r[3].replace(NBSP, "").replace(" zł", "").replace(",", ".")) for r in rows)
         assert round(suma, 2) == 440000.00
 
@@ -92,14 +110,69 @@ class TestKolumnaDoZaplaty:
         assert rows[1][3] == _zl("5 000,00") and rows[1][5] == "—"
 
     def test_zaplata_calosci_w_dwoch_wplatach_wypisuje_obie(self):
-        row = _rows(build_invoice_table_xml([
+        row = _blocks(build_invoice_table_xml([
             {"invoice_number": "C", "gross_amount": 10000.0, "outstanding_pln": 0,
              "payments": [{"date": "2026-05-10", "amount": 4000}, {"date": "2026-03-10", "amount": 6000}],
              "due_date": "2026-02-10", "payment_date": "2026-05-10", "delay_days": 89,
              "interest_pln": 200.99, "compensation_pln": 301},
-        ]))[1]
+        ]))[0]
         assert "częściowo" not in row
         assert row.index("10.03.2026") < row.index("10.05.2026")  # chronologicznie
+
+
+def _wiele_wplat():
+    """Kształt z pisma, które sprowokowało 0.8.3: 13 wpłat na jednej fakturze."""
+    dates = ["2026-07-08", "2026-07-08", "2026-07-09", "2026-07-10", "2026-07-13",
+             "2026-07-15", "2026-07-17", "2026-07-23", "2026-07-27", "2026-09-16",
+             "2026-09-17", "2026-09-18", "2026-09-22"]
+    amounts = [50000, 50000, 50000, 50000, 30000, 20000, 14000, 20000, 10000,
+               20000, 10000, 10000, 10000]
+    return [
+        {"invoice_number": "FV/2026/X", "gross_amount": 489888.00, "outstanding_pln": 145888.00,
+         "payments": [{"date": d, "amount": a} for d, a in zip(dates, amounts)],
+         "due_date": "2026-07-16", "payment_date": None, "delay_days": 71,
+         "interest_pln": 5203.16, "compensation_pln": 429.63},
+        {"invoice_number": "FV/2026/Y", "gross_amount": 70200.00, "outstanding_pln": 70200.00,
+         "due_date": "2026-08-26", "payment_date": None, "delay_days": 30,
+         "interest_pln": 793.36, "compensation_pln": 431.28},
+    ]
+
+
+def _grid_span(tc: str) -> int:
+    m = re.search(r'<w:gridSpan w:val="(\d+)"/>', tc)
+    return int(m.group(1)) if m else 1
+
+
+class TestWplatyWierszami:
+    """0.8.3: wpłata = osobny wiersz (data | kwota), nie lista w jednej komórce."""
+
+    def test_kazda_wplata_w_osobnym_wierszu(self):
+        rows = _rows(build_invoice_table_xml(_wiele_wplat()))[1:]
+        # „częściowo" + 13 wpłat + faktura bez wpłat
+        assert len(rows) == 1 + 13 + 1
+        assert rows[1] == ["08.07.2026", _zl("50 000,00")]
+        assert rows[13] == ["22.09.2026", _zl("10 000,00")]
+
+    def test_komorka_bez_lamania_linii(self):
+        assert "<w:br/>" not in build_invoice_table_xml(_wiele_wplat())
+
+    def test_komorki_faktury_scalone_w_pionie(self):
+        trs = _tr_xml(build_invoice_table_xml(_wiele_wplat()))[1:]
+        assert trs[0].count('<w:vMerge w:val="restart"/>') == 8
+        assert all(tr.count("<w:vMerge/>") == 8 for tr in trs[1:14])
+        assert "vMerge" not in trs[14]  # faktura bez wpłat = jeden zwykły wiersz
+
+    def test_kazdy_wiersz_wypelnia_cala_siatke(self):
+        xml = build_invoice_table_xml(_wiele_wplat())
+        grid = [int(w) for w in re.findall(r'<w:gridCol w:w="(\d+)"/>', xml)]
+        assert len(grid) == 10 and sum(grid) <= 9066
+        for tr in _tr_xml(xml):
+            assert sum(_grid_span(tc) for tc in re.findall(r"<w:tc>.*?</w:tc>", tr, flags=re.S)) == 10
+
+    def test_suma_wplat_plus_reszta_rowna_brutto(self):
+        rows = _rows(build_invoice_table_xml(_wiele_wplat()))[2:15]
+        wplaty = sum(float(r[1].replace(NBSP, "").replace(" zł", "").replace(",", ".")) for r in rows)
+        assert round(wplaty + 145888.00, 2) == 489888.00
 
 
 class TestPismo:
