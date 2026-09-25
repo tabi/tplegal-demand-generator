@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tplegal-demand-generator"
-version = "0.8.2"
+version = "0.8.3"
 description = "Demand letter generator & compensation calculator"
 requires-python = ">=3.10"
 dependencies = [

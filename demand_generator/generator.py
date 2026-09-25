@@ -284,24 +284,33 @@ def format_date_pl(d) -> str:
 # DOCX table generation — WordprocessingML XML
 # ---------------------------------------------------------------------------
 
-# Suma szerokości 9 000 twipów ≤ 9 066 (A4 minus marginesy 1 417 z wzoru pisma).
+# Suma szerokości 9 040 twipów ≤ 9 066 (A4 minus marginesy 1 417 z wzoru pisma).
 # „Do zapłaty" od 0.8.2: przy wpłacie częściowej „Kwota brutto" to pełna kwota
 # faktury, więc bez tej kolumny suma tabeli nie zgadzała się ze świadczeniem
 # głównym z pkt 1 pisma (zgłoszenie z 25.09.2026).
+# „Data zapłaty" od 0.8.3 zajmuje DWIE kolumny siatki (data | kwota wpłaty): każda
+# wpłata ma własny wiersz, a komórki faktury są scalone w pionie. W 0.8.2 wszystkie
+# wpłaty szły do jednej komórki — 13 wpłat = 27 linii w wąskiej kolumnie.
+# Szerokości zmierzone na TNR 8 pt przy marginesie komórki 57 (CELL_MARGIN):
+# najdłuższy nagłówek „Rekompensata" 1 013 + 114, data 720 + 114, kwota
+# „489 888,00 zł" 875 + 114.
 TABLE_COLUMNS = [
-    ("Lp.", 450, "center"),
-    ("Nr faktury", 1150, "left"),
-    ("Kwota brutto", 1100, "right"),
-    ("Do zapłaty", 1100, "right"),
-    ("Termin zapłaty", 950, "center"),
-    ("Data zapłaty", 1100, "center"),
-    ("Dni opóźnienia", 900, "center"),
-    ("Odsetki", 1050, "right"),
-    ("Rekompensata", 1200, "right"),
+    ("Lp.", 380, "center"),
+    ("Nr faktury", 1000, "left"),
+    ("Kwota brutto", 1000, "right"),
+    ("Do zapłaty", 1000, "right"),
+    ("Termin zapłaty", 850, "center"),
+    ("Data zapłaty", 1850, "center"),
+    ("Dni opóźnienia", 870, "center"),
+    ("Odsetki", 950, "right"),
+    ("Rekompensata", 1140, "right"),
 ]
+PAYMENT_COLUMN = 5
+PAYMENT_SUBCOLUMNS = (850, 1000)  # data wpłaty | kwota wpłaty
 
 FONT_SIZE_HPS = "16"  # 8pt in half-points
 HEADER_BG = "D9D9D9"
+CELL_MARGIN = 57  # twipy z każdej strony (TableGrid domyślnie 108)
 
 
 def _cell_rpr(bold=False, size=FONT_SIZE_HPS):
@@ -329,15 +338,28 @@ def _cell_ppr(align="left"):
     )
 
 
-def _tc(text: str, width: int, align="left", bold=False, shading=None):
-    """Generate a single table cell XML."""
+def _tc(text: str, width: int, align="left", bold=False, shading=None,
+        span=1, vmerge=None):
+    """Generate a single table cell XML.
+
+    `span` = ile kolumn siatki zajmuje komórka (w:gridSpan), `vmerge` = scalenie
+    w pionie: "restart" w pierwszym wierszu faktury, "continue" w kolejnych
+    (komórka kontynuacji jest pusta — Word pokazuje treść z pierwszej).
+    """
     tc_pr = f'<w:tcPr><w:tcW w:w="{width}" w:type="dxa"/>'
+    if span > 1:
+        tc_pr += f'<w:gridSpan w:val="{span}"/>'
+    if vmerge == "restart":
+        tc_pr += '<w:vMerge w:val="restart"/>'
+    elif vmerge == "continue":
+        tc_pr += '<w:vMerge/>'
+        text = ""
     if shading:
         tc_pr += f'<w:shd w:val="clear" w:color="auto" w:fill="{shading}"/>'
     tc_pr += '<w:vAlign w:val="center"/></w:tcPr>'
 
     rpr = _cell_rpr(bold=bold)
-    # "\n" w tekście = złamanie wiersza w komórce (lista wpłat częściowych)
+    # "\n" w tekście = złamanie wiersza w komórce
     runs = '<w:br/>'.join(
         f'<w:t xml:space="preserve">{_xml_escape(line)}</w:t>'
         for line in text.split("\n")
@@ -369,26 +391,60 @@ def _outstanding(inv: dict) -> Decimal:
     return Decimal(str(inv.get("gross_amount", 0)))
 
 
-def _payment_cell(inv: dict) -> str:
-    """Treść kolumny „Data zapłaty".
+def _payment_rows(inv: dict) -> list[tuple[str, ...]]:
+    """Treść kolumny „Data zapłaty" — jedna krotka na wiersz tabeli.
 
-    Wpłaty częściowe (`payments`) wypisane są z datą i kwotą — inaczej faktura
-    wyglądała na niezapłaconą (samo „—"), a odsetki od spłaconej części nie
-    miały w tabeli żadnego oparcia. Jedna wpłata całości = sama data, jak dotąd.
+    Krotka 1-elementowa = komórka na obie podkolumny, 2-elementowa = (data, kwota).
+    Wpłaty częściowe (`payments`) wypisane są z datą i kwotą, każda w osobnym
+    wierszu — inaczej faktura wyglądała na niezapłaconą (samo „—"), a odsetki od
+    spłaconej części nie miały w tabeli żadnego oparcia. Jedna wpłata całości =
+    sama data, jak dotąd.
     """
     payments = inv.get("payments") or []
     partial = _outstanding(inv) > 0
     if payments and (partial or len(payments) > 1):
-        lines = ["częściowo"] if partial else []
+        rows: list[tuple[str, ...]] = [("częściowo",)] if partial else []
         for p in sorted(payments, key=lambda p: str(p["date"])):
-            lines.append(f"{format_date_pl(p['date'])}\n{format_pln_zl(p['amount'])}")
-        return "\n".join(lines)
+            rows.append((format_date_pl(p["date"]), format_pln_zl(p["amount"])))
+        return rows
     payment_date = inv.get("payment_date")
     if payment_date:
-        return format_date_pl(payment_date)
+        return [(format_date_pl(payment_date),)]
     if payments:
-        return format_date_pl(payments[-1]["date"])
-    return "\u2014"  # em dash for unpaid
+        return [(format_date_pl(payments[-1]["date"]),)]
+    return [("—",)]  # em dash for unpaid
+
+
+def _invoice_rows_xml(idx: int, inv: dict) -> list[str]:
+    """Wiersze tabeli jednej faktury: pierwszy niesie dane faktury, kolejne
+    tylko wpłaty (reszta komórek scalona w pionie z pierwszym)."""
+    invoice_cells = [
+        str(idx),
+        inv.get("invoice_number", ""),
+        format_pln_zl(inv.get("gross_amount", 0)),
+        format_pln_zl(_outstanding(inv)),
+        format_date_pl(inv["due_date"]),
+        None,  # „Data zapłaty" — z _payment_rows
+        str(inv.get("delay_days", 0)),
+        format_pln_zl(inv.get("interest_pln", 0)),
+        format_pln_zl(inv.get("compensation_pln", 0)),
+    ]
+    payment_rows = _payment_rows(inv)
+    merged = len(payment_rows) > 1
+    rows = []
+    for i, payment in enumerate(payment_rows):
+        vmerge = None if not merged else ("restart" if i == 0 else "continue")
+        cells = []
+        for col, text in enumerate(invoice_cells):
+            if col != PAYMENT_COLUMN:
+                cells.append(_tc(text, TABLE_COLUMNS[col][1], "center", vmerge=vmerge))
+            elif len(payment) == 1:
+                cells.append(_tc(payment[0], TABLE_COLUMNS[col][1], "center", span=2))
+            else:
+                cells.append(_tc(payment[0], PAYMENT_SUBCOLUMNS[0], "center"))
+                cells.append(_tc(payment[1], PAYMENT_SUBCOLUMNS[1], "right"))
+        rows.append(f'<w:tr><w:trPr><w:cantSplit/></w:trPr>{"".join(cells)}</w:tr>')
+    return rows
 
 
 def _require_table_matches_principal(data: dict, invoices_detail: list[dict]) -> None:
@@ -420,10 +476,14 @@ def build_invoice_table_xml(invoices_detail: list[dict]) -> str:
         delay_days, interest_pln, compensation_pln
         (od 0.8.2, opcjonalnie) outstanding_pln — reszta do zapłaty,
         payments — [{"date", "amount"}] wpłaty częściowe
+    Od 0.8.3 każda wpłata ma osobny wiersz, komórki faktury są scalone w pionie.
     """
     borders = ''.join(_border_attr(t) for t in
                       ['top', 'left', 'bottom', 'right', 'insideH', 'insideV'])
-    grid = ''.join(f'<w:gridCol w:w="{col[1]}"/>' for col in TABLE_COLUMNS)
+    grid_widths = []
+    for i, col in enumerate(TABLE_COLUMNS):
+        grid_widths.extend(PAYMENT_SUBCOLUMNS if i == PAYMENT_COLUMN else [col[1]])
+    grid = ''.join(f'<w:gridCol w:w="{w}"/>' for w in grid_widths)
 
     tbl_pr = (
         '<w:tblPr>'
@@ -431,31 +491,23 @@ def build_invoice_table_xml(invoices_detail: list[dict]) -> str:
         '<w:tblW w:w="0" w:type="auto"/>'
         '<w:jc w:val="center"/>'
         f'<w:tblBorders>{borders}</w:tblBorders>'
+        f'<w:tblCellMar><w:left w:w="{CELL_MARGIN}" w:type="dxa"/>'
+        f'<w:right w:w="{CELL_MARGIN}" w:type="dxa"/></w:tblCellMar>'
         '<w:tblLook w:val="04A0" w:firstRow="1" w:lastRow="0" '
         'w:firstColumn="0" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/>'
         '</w:tblPr>'
     )
 
     header_cells = ''.join(
-        _tc(col[0], col[1], align="center", bold=True, shading=HEADER_BG)
-        for col in TABLE_COLUMNS
+        _tc(col[0], col[1], align="center", bold=True, shading=HEADER_BG,
+            span=2 if i == PAYMENT_COLUMN else 1)
+        for i, col in enumerate(TABLE_COLUMNS)
     )
     header_row = f'<w:tr><w:trPr><w:tblHeader/></w:trPr>{header_cells}</w:tr>'
 
     data_rows = []
     for idx, inv in enumerate(invoices_detail, 1):
-        cells = [
-            _tc(str(idx), TABLE_COLUMNS[0][1], "center"),
-            _tc(inv.get("invoice_number", ""), TABLE_COLUMNS[1][1], "center"),
-            _tc(format_pln_zl(inv.get("gross_amount", 0)), TABLE_COLUMNS[2][1], "center"),
-            _tc(format_pln_zl(_outstanding(inv)), TABLE_COLUMNS[3][1], "center"),
-            _tc(format_date_pl(inv["due_date"]), TABLE_COLUMNS[4][1], "center"),
-            _tc(_payment_cell(inv), TABLE_COLUMNS[5][1], "center"),
-            _tc(str(inv.get("delay_days", 0)), TABLE_COLUMNS[6][1], "center"),
-            _tc(format_pln_zl(inv.get("interest_pln", 0)), TABLE_COLUMNS[7][1], "center"),
-            _tc(format_pln_zl(inv.get("compensation_pln", 0)), TABLE_COLUMNS[8][1], "center"),
-        ]
-        data_rows.append(f'<w:tr>{"".join(cells)}</w:tr>')
+        data_rows.extend(_invoice_rows_xml(idx, inv))
 
     table = f'<w:tbl>{tbl_pr}<w:tblGrid>{grid}</w:tblGrid>{header_row}{"".join(data_rows)}</w:tbl>'
     return f'<w:p><w:pPr><w:spacing w:after="0"/></w:pPr></w:p>{table}<w:p><w:pPr><w:spacing w:after="0"/></w:pPr></w:p>'
