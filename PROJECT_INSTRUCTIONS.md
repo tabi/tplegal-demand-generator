@@ -40,7 +40,7 @@ pip install git+https://github.com/tabi/tplegal-demand-generator.git requests ho
 calc-rekompensa --version
 ```
 
-Wersja musi być **co najmniej 0.8.1** (wpłaty częściowe, jeden format numeru rachunku). Niższa → powtórz
+Wersja musi być **co najmniej 0.8.2** (wpłaty częściowe, jeden format numeru rachunku, kolumna „Do zapłaty" w tabeli). Niższa → powtórz
 instalację z `--force-reinstall` i sprawdź ponownie, zanim policzysz cokolwiek.
 
 Po instalacji masz komendy `calc-rekompensa` i `generate-demand`. Template DOCX
@@ -138,8 +138,14 @@ wynik bierzesz do wezwania. Usunięte faktury wymień użytkownikowi.
   "invoice_tiers": ["EUR_70"],
   "invoices_detail": [
     {"invoice_number": "FV/2026/001", "gross_amount": 12500.00,
+     "outstanding_pln": 0.00,
      "due_date": "2026-03-16", "payment_date": "2026-06-20",
-     "delay_days": 96, "interest_pln": 460.27, "compensation_pln": 301.00}
+     "delay_days": 96, "interest_pln": 460.27, "compensation_pln": 301.00},
+    {"invoice_number": "FV/2026/002", "gross_amount": 10000.00,
+     "outstanding_pln": 4000.00,
+     "payments": [{"date": "2026-03-10", "amount": 6000.00}],
+     "due_date": "2026-02-10", "payment_date": null,
+     "delay_days": 89, "interest_pln": 200.99, "compensation_pln": 301.00}
   ]
 }
 ```
@@ -160,7 +166,9 @@ z `"prescription_status": "PRZEDAWNIONE"`** (nie ma ich w sumach):
 | Pole wiersza | Źródło |
 |---|---|
 | `invoice_number` | `invoice_number` |
-| `gross_amount` | `gross` z Twojego `invoices.json` |
+| `gross_amount` | `gross` z Twojego `invoices.json` — PEŁNA kwota faktury, także przy wpłatach częściowych |
+| `outstanding_pln` | `outstanding_pln` z wyniku — OBOWIĄZKOWO w każdym wierszu. Suma tej kolumny musi równać się `total_principal_pln`, inaczej `generate-demand` odmówi pisma |
+| `payments` | `payments` z Twojego `invoices.json`, bez zmian (tylko gdy faktura je ma) — generator wypisze każdą wpłatę w kolumnie „Data zapłaty" |
 | `due_date` | `due_date` z Twojego `invoices.json` (surowy, z faktury) |
 | `payment_date` | `payment_date` z `invoices.json`; przy `payments`: data ostatniej wpłaty, gdy `outstanding_pln` = 0, a `null`, gdy coś zostało do zapłaty |
 | `delay_days` | `delay_days` |
