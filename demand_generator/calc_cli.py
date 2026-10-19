@@ -30,7 +30,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from demand_generator import __version__
-from demand_generator.calc import DebtorType, calculate_batch
+from demand_generator.calc import DebtorType, NBPRateUnavailableError, calculate_batch
 from demand_generator.check_rates import warn_if_stale
 from demand_generator.utils import (
     DEBTOR_TYPE_KEY,
@@ -330,6 +330,12 @@ def main():
             "art. 8 ust. 1. Zgłoś sprawę radcy.",
             file=sys.stderr,
         )
+        sys.exit(1)
+    except NBPRateUnavailableError as e:
+        # Bez kursu NBP nie ma kwoty rekompensaty w PLN — do 0.8.3 leciał tu
+        # cichy kurs 4,30. Pismo nie może powstać z fikcyjnej kwoty.
+        print(f"⛔ Brak kursu EUR z NBP: {e}", file=sys.stderr)
+        print("   Spróbuj ponownie za kilka minut. Nie wpisuj kursu ręcznie.", file=sys.stderr)
         sys.exit(1)
     except ValueError as e:
         # Wpłaty niespójne z fakturą (nadpłata, kwota ≤ 0) — nie ma bezpiecznej
