@@ -12,13 +12,14 @@ import tempfile
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_CEILING
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from demand_generator.calc import (
     INTEREST_RATES,
     DebtorType,
+    NBPRateUnavailableError,
     UnknownRatePeriodError,
     compute_effective_due_date,
     next_business_day,
@@ -390,19 +391,80 @@ class TestNBPRates:
         assert rate_date.month == 12
         assert rate_date.year == 2024
 
-    @patch("demand_generator.calc.requests.get")
-    def test_nbp_fallback_on_error(self, mock_get):
-        """Jeśli API NBP niedostępne -> fallback 4.30."""
-        from demand_generator.calc import _nbp_cache
-        # Wyczyść cache dla daty testowej
-        test_date = date(2099, 1, 15)
-        for offset in range(6):
-            key = (test_date - timedelta(days=offset)).isoformat()
-            _nbp_cache.pop(key, None)
+    @staticmethod
+    def _clear_nbp_cache(target):
+        from demand_generator.calc import _nbp_cache, _nbp_rate_dates
+        _nbp_cache.pop(target.isoformat(), None)
+        _nbp_rate_dates.pop(target.isoformat(), None)
 
+    @staticmethod
+    def _resp(status, mid=None, effective=None):
+        r = MagicMock()
+        r.status_code = status
+        r.json.return_value = {"rates": [{"mid": mid, "effectiveDate": effective}]}
+        return r
+
+    @patch("demand_generator.calc.requests.get")
+    def test_nbp_network_error_raises_no_fallback(self, mock_get):
+        """API NBP niedostępne -> twardy błąd, nie fikcyjny kurs 4,30 (0.8.4)."""
+        from demand_generator.calc import _nbp_cache
+        test_date = date(2099, 1, 15)
+        self._clear_nbp_cache(test_date)
         mock_get.side_effect = Exception("Network error")
-        rate = get_nbp_eur_rate(test_date)
-        assert rate == Decimal("4.30")
+        with pytest.raises(NBPRateUnavailableError):
+            get_nbp_eur_rate(test_date)
+        assert test_date.isoformat() not in _nbp_cache
+
+    @patch("demand_generator.calc.requests.get")
+    def test_nbp_http_500_does_not_step_back(self, mock_get):
+        """HTTP 5xx to awaria, nie brak tabeli — nie bierzemy kursu z dnia wcześniej."""
+        test_date = date(2099, 3, 31)
+        self._clear_nbp_cache(test_date)
+        mock_get.side_effect = [self._resp(500), self._resp(200, 4.2111, "2099-03-30")]
+        with pytest.raises(NBPRateUnavailableError):
+            get_nbp_eur_rate(test_date)
+        assert mock_get.call_count == 1
+
+    @patch("demand_generator.calc.requests.get")
+    def test_nbp_404_steps_back_and_reports_effective_date(self, mock_get):
+        """404 = brak tabeli A tego dnia -> dzień wcześniej; eur_rate_date = data użytej tabeli."""
+        rate_date = get_compensation_eur_rate_date(date(2099, 4, 15))
+        self._clear_nbp_cache(rate_date)
+        earlier = (rate_date - timedelta(days=1)).isoformat()
+        mock_get.side_effect = [self._resp(404), self._resp(200, 4.2111, earlier)]
+        comp = calculate_compensation(Decimal("1000"), date(2099, 4, 15))
+        assert comp["eur_rate"] == Decimal("4.2111")
+        assert comp["eur_rate_date"] == date.fromisoformat(earlier)
+
+    @patch("demand_generator.calc.requests.get")
+    def test_nbp_no_table_in_window_raises(self, mock_get):
+        """6 dni bez tabeli (same 404) -> błąd, nie fallback."""
+        test_date = date(2099, 5, 29)
+        self._clear_nbp_cache(test_date)
+        mock_get.return_value = self._resp(404)
+        with pytest.raises(NBPRateUnavailableError):
+            get_nbp_eur_rate(test_date)
+        assert mock_get.call_count == 6
+
+    def test_calc_cli_nbp_down_exits_1_without_json(self, tmp_path, monkeypatch, capsys):
+        """calc-rekompensa przy awarii NBP: ⛔ na stderr, exit 1, pusty stdout (bez kwot)."""
+        from demand_generator import calc_cli
+
+        src = tmp_path / "in.json"
+        src.write_text(json.dumps({
+            "debtor_type": "private",
+            "invoices": [{"invoice_number": "FV/1", "gross": 1000,
+                          "due_date": "2026-03-02", "payment_date": "2026-04-01"}],
+        }))
+        monkeypatch.setattr("sys.argv", ["calc-rekompensa", "--json", str(src)])
+        with patch("demand_generator.calc.get_nbp_eur_rate",
+                   side_effect=NBPRateUnavailableError("NBP API HTTP 503")):
+            with pytest.raises(SystemExit) as exc:
+                calc_cli.main()
+        assert exc.value.code == 1
+        out = capsys.readouterr()
+        assert "Brak kursu EUR z NBP" in out.err
+        assert out.out == ""
 
 
 # ═══════════════════════════════════════════════════════════════════════

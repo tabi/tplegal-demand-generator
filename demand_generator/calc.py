@@ -12,7 +12,6 @@ Podstawa prawna:
     - Art. 118 KC — przedawnienie (3 lata + reguła końca roku)
 """
 
-import warnings
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_CEILING, ROUND_HALF_UP
 from enum import Enum
@@ -76,6 +75,17 @@ class UnknownRatePeriodError(RuntimeError):
     gdy weszło w życie nowe obwieszczenie, a tabela nie została zaktualizowana.
     Wcześniej w tej sytuacji działał cichy fallback na ostatnią znaną stawkę,
     co dawało wezwania z błędną kwotą odsetek i bez żadnego sygnału o błędzie.
+    """
+
+
+class NBPRateUnavailableError(RuntimeError):
+    """Brak kursu EUR/PLN z NBP dla daty kursu rekompensaty (art. 10 ust. 1a).
+
+    Wcześniej działał tu cichy fallback na kurs 4,30 (zapisywany w cache na
+    resztę biegu), a po timeoucie albo HTTP 5xx kod cofał się o dzień i podawał
+    kurs z innego dnia pod datą żądaną. Jedynym śladem był warnings.warn, więc
+    wezwania dostawały fikcyjną kwotę rekompensaty (review 19.10.2026, 0.8.4).
+    RuntimeError, nie ValueError — to awaria źródła, nie złe dane wejściowe.
     """
 
 
@@ -149,6 +159,8 @@ PL_HOLIDAYS = holidays.Poland()
 
 # Cache kursów NBP EUR/PLN
 _nbp_cache: dict[str, Decimal] = {}
+# Data tabeli NBP faktycznie użytej dla klucza z _nbp_cache (≠ klucz po 404)
+_nbp_rate_dates: dict[str, date] = {}
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -388,6 +400,11 @@ def get_nbp_eur_rate(target_date: date) -> Decimal:
     Pobiera kurs średni EUR/PLN z tabeli A NBP dla danej daty.
     Jeśli data to dzień wolny, cofa się do 5 dni wstecz.
     Cachuje wyniki w pamięci.
+
+    Cofamy się TYLKO po HTTP 404 (NBP nie opublikował tabeli tego dnia).
+    Timeout, błąd sieci, HTTP 5xx albo nieczytelna odpowiedź = awaria, nie
+    brak tabeli → NBPRateUnavailableError. Data tabeli faktycznie użytej
+    trafia do _nbp_rate_dates (czyta ją calculate_compensation).
     """
     cache_key = target_date.isoformat()
     if cache_key in _nbp_cache:
@@ -398,18 +415,31 @@ def get_nbp_eur_rate(target_date: date) -> Decimal:
         url = f"https://api.nbp.pl/api/exchangerates/rates/a/eur/{check_date.isoformat()}/?format=json"
         try:
             resp = requests.get(url, timeout=10)
-            if resp.status_code == 200:
-                data = resp.json()
-                rate = Decimal(str(data["rates"][0]["mid"]))
-                _nbp_cache[cache_key] = rate
-                return rate
-        except Exception:
+        except Exception as e:
+            raise NBPRateUnavailableError(
+                f"NBP API niedostępne ({check_date}, kurs na {target_date}): {e}"
+            ) from e
+        if resp.status_code == 404:
             continue
+        if resp.status_code != 200:
+            raise NBPRateUnavailableError(
+                f"NBP API HTTP {resp.status_code} ({check_date}, kurs na {target_date})"
+            )
+        try:
+            row = resp.json()["rates"][0]
+            rate = Decimal(str(row["mid"]))
+            effective = date.fromisoformat(row.get("effectiveDate") or check_date.isoformat())
+        except Exception as e:
+            raise NBPRateUnavailableError(
+                f"NBP API: nieczytelna odpowiedź ({check_date}, kurs na {target_date}): {e}"
+            ) from e
+        _nbp_cache[cache_key] = rate
+        _nbp_rate_dates[cache_key] = effective
+        return rate
 
-    warnings.warn(f"NBP API failed for {target_date}, using fallback 4.30")
-    fallback = Decimal("4.30")
-    _nbp_cache[cache_key] = fallback
-    return fallback
+    raise NBPRateUnavailableError(
+        f"NBP: brak tabeli A EUR w dniach {target_date - timedelta(days=5)} … {target_date}"
+    )
 
 
 def get_compensation_eur_rate_date(due_date: date) -> date:
@@ -474,13 +504,16 @@ def calculate_compensation(gross: Decimal, due_date: date) -> dict:
     comp_eur, tier = get_compensation_tier(gross)
     rate_date = get_compensation_eur_rate_date(due_date)
     eur_rate = get_nbp_eur_rate(rate_date)
+    # Data tabeli faktycznie użytej: dzień wcześniej, gdy NBP nie opublikował
+    # tabeli w rate_date (404). Kurs podany z zewnątrz (mock) → rate_date.
+    eur_rate_date = _nbp_rate_dates.get(rate_date.isoformat(), rate_date)
     comp_pln = (comp_eur * eur_rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
     return {
         "comp_eur": comp_eur,
         "tier": tier,
         "eur_rate": eur_rate,
-        "eur_rate_date": rate_date,
+        "eur_rate_date": eur_rate_date,
         "comp_pln": comp_pln,
     }
 
