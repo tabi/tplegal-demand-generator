@@ -199,8 +199,9 @@ z JSON" → GUS nie odpowiedział, w piśmie są dane z JSON-a.
 - Ostrzeżenia, każde WYRAŹNIE:
   - każda `UWAGA` ze stderr (status dłużnika, stawki bliskie końca tabeli)
   - **[BRAK DANYCH — UZUPEŁNIJ]** w piśmie → uzupełnić w Wordzie przed wysyłką
-  - warning `NBP API failed … fallback 4.30` → kwota rekompensaty może być
-    błędna, kurs trzeba sprawdzić w tabeli A NBP
+  - `⛔ Brak kursu EUR z NBP` (exit 1, od 0.8.4) → pismo NIE powstaje;
+    ponów za kilka minut, kursu NIE wpisuj ręcznie (do 0.8.3 leciał tu
+    po cichu kurs 4,30)
   - faktury bliskie przedawnienia (niżej)
 
 **Przedawnienie — jak rozpoznać „bliskie":** roszczenie przedawnia się
